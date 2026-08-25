@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+
 """
 Jules TUI - A Terminal User Interface for Google's Jules CLI
-Supports Linux, macOS, and Unix-based operating systems.
-Zero external dependencies (uses standard library Python 3 & curses).
+Supports Linux and MacOS
+
+By. nebuff
 """
 
 import curses
@@ -18,7 +20,7 @@ import textwrap
 import threading
 import time
 
-# --- Configuration & Storage Paths ---
+# Configuration & Storage Paths
 CONFIG_DIR = os.path.expanduser("~/.config/jules-tui")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 SESSIONS_DATA_FILE = os.path.join(CONFIG_DIR, "sessions_chat.json")
@@ -89,7 +91,7 @@ def send_desktop_notification(title, body):
             pass
     return False
 
-# --- Comprehensive Themes (No Emojis) ---
+# Comprehensive Themes
 THEMES = {
     "twilight": {
         "name": "Twilight (Amber/Warm)",

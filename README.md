@@ -1,8 +1,8 @@
 # Jules TUI
 
-A clean, high-performance, and feature-rich **Terminal User Interface (TUI)** for **Google Jules** (Google's asynchronous AI coding agent CLI).
+A clean, high-performance, and feature-rich **Terminal User Interface (TUI)** for **Google Jules**
 
-Works seamlessly across Linux, macOS, BSD, and Unix-based operating systems with **zero external dependencies** (pure standard library Python 3 & `curses`).
+I got fed up with the basic google jules webui so I made a nice UI
 
 ---
 
