@@ -22,6 +22,7 @@ import time
 CONFIG_DIR = os.path.expanduser("~/.config/jules-tui")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 SESSIONS_DATA_FILE = os.path.join(CONFIG_DIR, "sessions_chat.json")
+PROMPTS_DATA_FILE = os.path.join(CONFIG_DIR, "prompts.json")
 
 SUPPORTED_MODELS = [
     "Default (Auto)",
@@ -76,6 +77,23 @@ def save_chat_history(data):
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(SESSIONS_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def load_prompts_map():
+    if os.path.isfile(PROMPTS_DATA_FILE):
+        try:
+            with open(PROMPTS_DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_prompts_map(data):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(PROMPTS_DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass
@@ -332,7 +350,7 @@ class JulesClient:
     def get_sessions(self):
         """Fetch remote sessions from jules remote list --session with full columns."""
         try:
-            env = dict(os.environ, COLUMNS="240")
+            env = dict(os.environ, COLUMNS="300")
             res = subprocess.run(
                 [self.jules_bin, "remote", "list", "--session"],
                 capture_output=True,
@@ -360,9 +378,9 @@ class JulesClient:
                 if m:
                     d = m.groupdict()
                     st = d["status"].strip()
-                    if st.lower() == "pla":
+                    if st.lower().startswith("pla"):
                         st = "Planning"
-                    elif st.lower() == "in":
+                    elif st.lower().startswith("in"):
                         st = "In Progress"
                     sessions.append({
                         "id": d["id"].strip(),
@@ -392,9 +410,9 @@ class JulesClient:
                                 last_active = rest[0] if rest else ""
                                 status = " ".join(rest[1:]) if len(rest) > 1 else ""
                             st = status.strip()
-                            if st.lower() == "pla":
+                            if st.lower().startswith("pla"):
                                 st = "Planning"
-                            elif st.lower() == "in":
+                            elif st.lower().startswith("in"):
                                 st = "In Progress"
                             sessions.append({
                                 "id": sess_id,
@@ -474,7 +492,6 @@ class JulesClient:
         if parallel and parallel > 1:
             cmd.extend(["--parallel", str(parallel)])
         
-        # If a specific model is selected, add instruction directive
         final_prompt = prompt
         if model and model != "Default (Auto)":
             final_prompt = f"[Model Directive: Use {model}]\n{prompt}"
@@ -503,8 +520,9 @@ class JulesTUI:
         self.diff_cache = {}
         self.activity_log = []
         self.chat_history = load_chat_history()
-        self.session_discovery_time = {}  # session_id -> formatted discovery time
-        self.session_previous_status = {}  # session_id -> last known status
+        self.prompts_map = load_prompts_map()
+        self.session_discovery_time = {}
+        self.session_previous_status = {}
         
         # Tabs: Sessions, Timeline/Chat, Diff/Patch, Repositories, Settings, Activity Log
         self.active_tab = 0
@@ -633,6 +651,21 @@ class JulesTUI:
         self.diff_scroll_y = 0
         self.diff_scroll_x = 0
 
+    def _get_full_prompt(self, session):
+        """Retrieve full untruncated prompt description if available."""
+        sid = session.get("id", "")
+        if sid in self.prompts_map and self.prompts_map[sid]:
+            return self.prompts_map[sid]
+        
+        raw_desc = session.get("description", "")
+        # Clean trailing ellipsis
+        clean = re.sub(r"[…\.]{2,}$", "", raw_desc).strip()
+        # Search by prefix in prompts_map
+        for k, v in self.prompts_map.items():
+            if clean and (clean in v or v.startswith(clean[:25])):
+                return v
+        return raw_desc
+
     def _worker_loop(self):
         while self.running:
             try:
@@ -659,7 +692,7 @@ class JulesTUI:
             elif task_type == "new_session":
                 prompt, repo, parallel, model = payload
                 success, out = self.client.create_session(prompt, repo, parallel, model)
-                self.result_queue.put(("new_session_res", (success, out)))
+                self.result_queue.put(("new_session_res", (prompt, success, out)))
 
             self.task_queue.task_done()
 
@@ -678,7 +711,6 @@ class JulesTUI:
                     self.set_status(f"Error fetching sessions: {s_err}")
                     self.log(f"Session fetch error: {s_err}", "error")
                 else:
-                    # Check for completed sessions to send notification
                     now_str = datetime.datetime.now().strftime("%H:%M")
                     if self.session_previous_status:
                         for s in sessions:
@@ -688,14 +720,13 @@ class JulesTUI:
                             if old_st and ("progress" in old_st.lower() or "plan" in old_st.lower()) and ("complet" in new_st.lower() or "done" in new_st.lower() or "fail" in new_st.lower()):
                                 if self.notifications_enabled:
                                     n_title = f"Jules Session #{sid} is {new_st}"
-                                    n_body = f"Repository: {s['repo']}\n{s['description']}"
+                                    n_body = f"Repository: {s['repo']}\n{self._get_full_prompt(s)}"
                                     send_desktop_notification(n_title, n_body)
                                 if self.sound_enabled:
                                     curses.beep()
                                 self.set_status(f"NOTIFICATION: Session #{sid} is now {new_st}!")
                                 self.log(f"Session #{sid} status changed to {new_st}", "info")
 
-                    # Register discovery timestamps
                     for s in sessions:
                         sid = s["id"]
                         if sid not in self.session_discovery_time:
@@ -738,8 +769,15 @@ class JulesTUI:
                     self.show_message_modal(f"{action_name} Failed", out, is_error=True)
 
             elif msg_type == "new_session_res":
-                success, out = data
+                orig_prompt, success, out = data
                 if success:
+                    # Parse session ID from creation output if present
+                    sid_match = re.search(r"(\d{15,})", out)
+                    if sid_match:
+                        new_sid = sid_match.group(1)
+                        self.prompts_map[new_sid] = orig_prompt
+                        save_prompts_map(self.prompts_map)
+                    
                     self.set_status("New session created successfully!")
                     self.log(f"Created new session:\n{out}", "info")
                     if self.notifications_enabled:
@@ -758,7 +796,7 @@ class JulesTUI:
             q = self.search_query.lower()
             self.filtered_sessions = [
                 s for s in self.sessions
-                if q in s["id"].lower() or q in s["repo"].lower() or q in s["status"].lower() or q in s["description"].lower()
+                if q in s["id"].lower() or q in s["repo"].lower() or q in s["status"].lower() or q in self._get_full_prompt(s).lower()
             ]
         if self.session_index >= len(self.filtered_sessions):
             self.session_index = max(0, len(self.filtered_sessions) - 1)
@@ -899,9 +937,9 @@ class JulesTUI:
             s_repo = sess["repo"][:col_repo_w]
             raw_status = sess["status"]
             s_last = sess["last_active"][:col_last_w]
-            s_desc = sess["description"][:col_desc_w]
+            full_prompt = self._get_full_prompt(sess)
+            s_desc = full_prompt[:col_desc_w]
 
-            # Dynamic loading circle for active states
             status_low = raw_status.lower()
             if "progress" in status_low or "work" in status_low or "plan" in status_low:
                 s_status_disp = f"[{spinner_char}] {raw_status}"
@@ -955,7 +993,7 @@ class JulesTUI:
         return files
 
     def _draw_timeline_tab(self, start_y, start_x, height, width):
-        """Dedicated Session Timeline & Conversation Log View with spinning circle and full word-wrapped message visibility."""
+        """Dedicated Session Timeline & Conversation Log View with full untruncated word wrapping."""
         if not self.filtered_sessions:
             try:
                 self.stdscr.addstr(start_y + 2, start_x + 4, "No active session selected. Select a session in [1] Sessions first.", curses.color_pair(13))
@@ -974,7 +1012,6 @@ class JulesTUI:
         else:
             status_badge = f"Status: {current_sess['status']}"
 
-        # Accurate timestamps
         init_time = self.session_discovery_time.get(sess_id, "Active")
         sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | {status_badge} | Last activity: {current_sess['last_active']}"
         try:
@@ -988,11 +1025,12 @@ class JulesTUI:
         entries = []
         wrap_w = max(30, width - 8)
 
-        # 1. Initial Prompt / Task (Full message word-wrapped)
-        prompt_lines = textwrap.wrap(f"Prompt: {current_sess['description']}", width=wrap_w)
+        # 1. Full untruncated prompt (Word-wrapped completely)
+        full_prompt = self._get_full_prompt(current_sess)
+        prompt_lines = textwrap.wrap(f"Prompt: {full_prompt}", width=wrap_w)
         for p_line in prompt_lines:
             entries.append(("TASK", p_line, "header"))
-        entries.append(("TIME", f"Tracking on {current_sess['repo']} (Started ~{init_time})", "time"))
+        entries.append(("TIME", f"Tracking on {current_sess['repo']} (Discovered ~{init_time})", "time"))
         entries.append(("", "", "empty"))
 
         # 2. Extract modified files from diff if available
@@ -1112,7 +1150,7 @@ class JulesTUI:
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(3) | curses.A_BOLD)
             else:
-                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] to chat, [c] to continue/teleport, [a] apply patch)"
+                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] chat, [e] edit/view prompt, [c] continue, [a] apply)"
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(13))
 
@@ -1131,7 +1169,8 @@ class JulesTUI:
         current_sess = self.filtered_sessions[self.session_index]
         sess_id = current_sess["id"]
         
-        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] - {current_sess['description'][:max(10, width-50)]} "
+        full_p = self._get_full_prompt(current_sess)
+        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] - {full_p[:max(10, width-50)]} "
         try:
             self.stdscr.addstr(start_y, start_x, sub_hdr[:width], curses.color_pair(12) | curses.A_BOLD)
         except curses.error:
@@ -1316,7 +1355,7 @@ class JulesTUI:
         except curses.error:
             pass
 
-        shortcuts = " [1-6] Tab | [n] New | [t] Teleport | [p] Pull | [a] Apply | [i] Chat | [c] Continue | [/] Filter | [s] Settings | [q] Quit"
+        shortcuts = " [1-6] Tab | [n] New | [t] Teleport | [p] Pull | [a] Apply | [i] Chat | [e] Edit Prompt | [/] Filter | [q] Quit"
         shortcut_line = shortcuts[:max_x]
         try:
             self.stdscr.addstr(max_y - 1, 0, shortcut_line, curses.color_pair(2))
@@ -1486,7 +1525,17 @@ class JulesTUI:
             self.timeline_scroll_y += 1
         elif ch in (ord('i'), ord('I')):
             self.chat_input_active = True
-            self.set_status("Type follow-up message for Jules. Press [Enter] to send, [Esc] to cancel.")
+            self.set_status("Type message for Jules. Press [Enter] to send, [Esc] to cancel.")
+        elif ch in (ord('e'), ord('E')):
+            # Edit / expand full prompt
+            if self.filtered_sessions:
+                curr_s = self.filtered_sessions[self.session_index]
+                cur_p = self._get_full_prompt(curr_s)
+                new_p = self._text_input_modal("Session Full Prompt", "Prompt: ", initial=cur_p)
+                if new_p is not None and new_p.strip():
+                    self.prompts_map[curr_s["id"]] = new_p.strip()
+                    save_prompts_map(self.prompts_map)
+                    self.set_status("Updated full prompt description.")
         elif ch in (ord('c'), ord('C')):
             if self.filtered_sessions:
                 current_sess = self.filtered_sessions[self.session_index]
@@ -1799,8 +1848,8 @@ class JulesTUI:
 
     def _text_input_modal(self, title, prompt, initial=""):
         max_y, max_x = self.stdscr.getmaxyx()
-        win_w = min(60, max_x - 4)
-        win_h = 7
+        win_w = min(68, max_x - 4)
+        win_h = 8
         win_y = (max_y - win_h) // 2
         win_x = (max_x - win_w) // 2
 
@@ -1809,14 +1858,21 @@ class JulesTUI:
         curses.curs_set(1)
 
         val = initial
+        scroll_x = 0
+
         while True:
             win.erase()
             win.box()
             win.addstr(0, (win_w - len(title) - 2) // 2, f" {title} ", curses.color_pair(2) | curses.A_BOLD)
             win.addstr(2, 3, prompt, curses.color_pair(12))
             
-            input_box = val.ljust(win_w - 6)
-            win.addstr(3, 3, input_box[:win_w - 6], curses.color_pair(3))
+            box_inner_w = win_w - 6
+            if len(val) >= box_inner_w:
+                display_val = val[-box_inner_w+1:] + "_"
+            else:
+                display_val = val.ljust(box_inner_w)
+            
+            win.addstr(3, 3, display_val[:box_inner_w], curses.color_pair(3))
             win.addstr(5, 3, "[Enter] Confirm   [Esc] Cancel", curses.color_pair(13))
             win.refresh()
 
@@ -1931,6 +1987,7 @@ class JulesTUI:
             ("Actions & Views", ""),
             ("  Enter / Space", "Open Timeline & Chat view"),
             ("  i (in timeline)", "Focus Talk to Jules chat box"),
+            ("  e (in timeline)", "View & edit full session prompt"),
             ("  c (in timeline)", "Continue / Teleport into session"),
             ("  d / D", "View full Git Diff & Patch"),
             ("  n / N", "Create New Session (with AI Model picker!)"),
