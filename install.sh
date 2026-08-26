@@ -227,7 +227,7 @@ fi
 
 echo ""
 echo "=========================================="
-echo "  [+] Jules TUI successfully installed!"
+echo "    Jules TUI successfully installed!"
 echo "=========================================="
 echo ""
 echo "You can now start Jules TUI with:"
