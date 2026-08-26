@@ -25,12 +25,14 @@ SESSIONS_DATA_FILE = os.path.join(CONFIG_DIR, "sessions_chat.json")
 PROMPTS_DATA_FILE = os.path.join(CONFIG_DIR, "prompts.json")
 
 SUPPORTED_MODELS = [
-    "Default (Auto - Gemini)",
+    "Default (Auto - Jules Managed)",
     "Gemini 2.5 Pro (Deep Reasoning)",
     "Gemini 2.5 Flash (Fast Execution)",
     "Gemini 2.0 Flash",
-    "Gemini 1.5 Pro",
-    "Custom Model Directive"
+    "Gemini 2.0 Flash Thinking",
+    "Gemini 1.5 Pro (2M Context)",
+    "Gemini 1.5 Flash",
+    "Custom Model..."
 ]
 
 DEFAULT_CONFIG = {
