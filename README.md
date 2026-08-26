@@ -55,3 +55,6 @@ jtui
 - **Google Jules CLI** (`jules` installed in PATH or `~/.local/bin/jules`)
 - *(Optional)* `notify-send` (Linux) / `osascript` (macOS) for desktop notifications
 - *(Optional)* `xclip`, `wl-copy`, or `pbcopy` for clipboard copying
+
+> [!IMPORTANT]
+> AI was NOT Used in this script, I made it to learn how to create TUI scripts in Python with NCurses
