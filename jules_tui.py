@@ -561,11 +561,27 @@ class JulesClient:
         if directives:
             final_prompt = "\n".join(directives) + "\n\n" + prompt
         
-        cmd.append(final_prompt)
+        # Pipe via stdin to avoid flag collision when prompt starts with '-' (like bullet points)
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            res = subprocess.run(
+                cmd,
+                input=final_prompt,
+                capture_output=True,
+                text=True,
+                timeout=90,
+                encoding="utf-8"
+            )
             out = (res.stdout + "\n" + res.stderr).strip()
-            return res.returncode == 0, out
+            # If error mentions flags or fails, try argument with '--' delimiter
+            if res.returncode != 0 or "unknown shorthand flag" in out or "unknown flag" in out:
+                fallback_cmd = list(cmd) + ["--", final_prompt]
+                res_fb = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=90, encoding="utf-8")
+                out_fb = (res_fb.stdout + "\n" + res_fb.stderr).strip()
+                if res_fb.returncode == 0 and "Error:" not in out_fb:
+                    return True, out_fb
+            
+            is_ok = (res.returncode == 0 and "Error:" not in out and "unknown flag" not in out)
+            return is_ok, out
         except Exception as e:
             return False, str(e)
 
