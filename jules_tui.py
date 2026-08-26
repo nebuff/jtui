@@ -1913,12 +1913,10 @@ class JulesTUI:
                     model_idx = (model_idx + 1) % len(SUPPORTED_MODELS)
                 elif ch in (curses.KEY_UP, ord('k')):
                     focus = 0
-                elif ch in (curses.KEY_DOWN, ord('j'), ord('
-'), 10, 13):
+                elif ch in (curses.KEY_DOWN, ord('j'), ord('\n'), 10, 13):
                     focus = 2
             elif focus == 0:  # Repo field
-                if ch in (curses.KEY_DOWN, ord('
-'), 10, 13):
+                if ch in (curses.KEY_DOWN, ord('\n'), 10, 13):
                     focus = 1
                 elif ch == curses.KEY_UP:
                     focus = 5
@@ -1927,8 +1925,7 @@ class JulesTUI:
                 elif 32 <= ch <= 126:
                     repo_val += chr(ch)
             elif focus == 2:  # Parallel field
-                if ch in (curses.KEY_DOWN, ord('
-'), 10, 13):
+                if ch in (curses.KEY_DOWN, ord('\n'), 10, 13):
                     focus = 3
                 elif ch == curses.KEY_UP:
                     focus = 1
@@ -1949,32 +1946,25 @@ class JulesTUI:
                         focus = 4
                 elif ch in (curses.KEY_BACKSPACE, 127, 8):
                     prompt_val = prompt_val[:-1]
-                elif ch in (ord('
-'), 10, 13):
-                    # In multi-line prompt, Enter inserts newline unless bursting/pasting
-                    prompt_val += "
-"
-                elif 32 <= ch <= 126 or ch == ord('	'):
-                    # Burst-drain queue for ultra-fast multi-line pasting
-                    chars = [chr(ch) if ch != ord('	') else "  "]
+                elif ch in (ord('\n'), 10, 13):
+                    prompt_val += "\n"
+                elif 32 <= ch <= 126 or ch == ord('\t'):
+                    chars = [chr(ch) if ch != ord('\t') else "  "]
                     win.nodelay(True)
                     while True:
                         nxt = win.getch()
                         if nxt == -1:
                             break
-                        if nxt in (ord('
-'), 10, 13):
-                            chars.append("
-")
+                        if nxt in (ord('\n'), 10, 13):
+                            chars.append("\n")
                         elif 32 <= nxt <= 126:
                             chars.append(chr(nxt))
-                        elif nxt == ord('	'):
+                        elif nxt == ord('\t'):
                             chars.append("  ")
                     win.nodelay(False)
                     prompt_val += "".join(chars)
             elif focus == 4:  # Submit Button
-                if ch in (ord('
-'), 10, 13, ord(' ')):
+                if ch in (ord('\n'), 10, 13, ord(' ')):
                     p_text = prompt_val.strip()
                     if not p_text:
                         self.set_status("Please enter a task description!")
@@ -1992,8 +1982,7 @@ class JulesTUI:
                 elif ch in (curses.KEY_UP, ord('k')):
                     focus = 3
             elif focus == 5:  # Cancel Button
-                if ch in (ord('
-'), 10, 13, ord(' ')):
+                if ch in (ord('\n'), 10, 13, ord(' ')):
                     curses.curs_set(0)
                     return
                 elif ch in (curses.KEY_LEFT, ord('h')):
