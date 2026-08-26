@@ -1549,6 +1549,14 @@ class JulesTUI:
             self.timeline_scroll_y = max(0, self.timeline_scroll_y - 1)
         elif ch in (curses.KEY_DOWN, ord('j')):
             self.timeline_scroll_y += 1
+        elif ch == curses.KEY_PPAGE:
+            self.timeline_scroll_y = max(0, self.timeline_scroll_y - 10)
+        elif ch == curses.KEY_NPAGE:
+            self.timeline_scroll_y += 10
+        elif ch in (curses.KEY_HOME, ord('g')):
+            self.timeline_scroll_y = 0
+        elif ch in (curses.KEY_END, ord('G')):
+            self.timeline_scroll_y = 9999
         elif ch in (ord('i'), ord('I')):
             self.chat_input_active = True
             self.set_status("Type message for Jules. Press [Enter] to send, [Esc] to cancel.")
