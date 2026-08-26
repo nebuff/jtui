@@ -82,6 +82,31 @@ def save_chat_history(data):
     except Exception:
         pass
 
+def parse_diff_stats(diff_text):
+    """Parse diff text into file stats: filename -> {'added': int, 'deleted': int} and total stats."""
+    file_stats = {}
+    total_added = 0
+    total_deleted = 0
+    current_file = None
+    for line in (diff_text or '').splitlines():
+        if line.startswith('diff --git'):
+            parts = line.split()
+            if len(parts) >= 4:
+                b_path = parts[3]
+                if b_path.startswith('b/'):
+                    b_path = b_path[2:]
+                current_file = b_path
+                if current_file not in file_stats:
+                    file_stats[current_file] = {'added': 0, 'deleted': 0}
+        elif current_file:
+            if line.startswith('+') and not line.startswith('+++'):
+                file_stats[current_file]['added'] += 1
+                total_added += 1
+            elif line.startswith('-') and not line.startswith('---'):
+                file_stats[current_file]['deleted'] += 1
+                total_deleted += 1
+    return file_stats, total_added, total_deleted
+
 def wrap_multiline_text(text, width):
     wrapped = []
     for paragraph in str(text).splitlines():
@@ -1025,9 +1050,11 @@ class JulesTUI:
         else:
             status_badge = f"Status: {current_sess['status']}"
 
+        # Sub-header with Model display
+        model_name = self.default_model if self.default_model else "Gemini 2.5 Pro"
         init_time = self.session_discovery_time.get(sess_id, "")
         time_str = f"Started: ~{init_time}" if init_time else f"Active: {current_sess['last_active']}"
-        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | {status_badge} | {time_str}"
+        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | Model: {model_name} | {status_badge} | {time_str}"
         try:
             self.stdscr.addstr(start_y, start_x, sub_hdr[:width], curses.color_pair(12) | curses.A_BOLD)
         except curses.error:
@@ -1037,25 +1064,26 @@ class JulesTUI:
         timeline_height = height - chat_box_height - 1
         
         entries = []
-        wrap_w = max(30, width - 8)
+        # Ensure prompt wrapping fits comfortably across lines
+        prompt_wrap_w = min(75, max(30, width - 14))
+        text_wrap_w = max(25, width - 12)
 
-        # 1. First Chat Bubble: User Initial Prompt (Full, word-wrapped, no truncation)
+        # 1. First Chat Bubble: User Initial Prompt (Formatted on clean new lines)
         full_prompt = self._get_full_prompt(current_sess)
         entries.append(("USER_TAG", f">>> You (Prompt):", "user_msg"))
-        text_wrap_w = max(20, width - 12)
-        for p_line in wrap_multiline_text(full_prompt, text_wrap_w):
+        for p_line in wrap_multiline_text(full_prompt, prompt_wrap_w):
             entries.append(("USER_BODY", f"    {p_line}", "user_body"))
         entries.append(("", "", "empty"))
 
         # 2. Agent Status & Activity
         if "plan" in status_low:
-            entries.append(("AGENT_TAG", f"[*] Jules (Planning):", "agent_msg"))
+            entries.append(("AGENT_TAG", f"[*] Jules (Planning with {model_name}):", "agent_msg"))
             for b_line in wrap_multiline_text("Inspecting codebase structure on " + current_sess['repo'] + ", analyzing requirements, and building execution steps...", text_wrap_w):
                 entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
             entries.append(("STEP", f"    Status: [{spinner_char}] Planning & Architecture Analysis", "step_card"))
             entries.append(("", "", "empty"))
         elif "progress" in status_low or "work" in status_low:
-            entries.append(("AGENT_TAG", f"[*] Jules (Working):", "agent_msg"))
+            entries.append(("AGENT_TAG", f"[*] Jules (Working with {model_name}):", "agent_msg"))
             for b_line in wrap_multiline_text("Applying code modifications and running automated verification tests in remote VM...", text_wrap_w):
                 entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
             entries.append(("STEP", f"    Status: [{spinner_char}] Working - Verification and pre-commit checks", "step_card"))
@@ -1071,14 +1099,19 @@ class JulesTUI:
                 entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
             entries.append(("", "", "empty"))
 
-        # 3. Modified files from diff if available
+        # 3. Modified files with Added/Deleted Line Diff Stats
         diff_text = self.diff_cache.get(sess_id)
         if diff_text:
-            mod_files = self._parse_modified_files(diff_text)
-            if mod_files:
-                entries.append(("FILES_TAG", "    [Modified Files]:", "file_update"))
-                for mf in mod_files:
-                    entries.append(("FILE_ITEM", f"      - {mf}", "file_update"))
+            file_stats, tot_add, tot_del = parse_diff_stats(diff_text)
+            if file_stats:
+                entries.append(("FILES_TAG", f"    [Modified Files (+{tot_add:,}, -{tot_del:,})]:", "file_update"))
+                # Prioritize non-node_modules files first
+                sorted_files = sorted(file_stats.keys(), key=lambda f: (1 if "node_modules" in f else 0, f))
+                for mf in sorted_files[:15]:
+                    st = file_stats[mf]
+                    entries.append(("FILE_ITEM", f"      - {mf} (+{st['added']}, -{st['deleted']})", "file_item"))
+                if len(sorted_files) > 15:
+                    entries.append(("FILE_ITEM", f"      ... and {len(sorted_files)-15} more files", "time"))
                 entries.append(("", "", "empty"))
 
         # 4. User and Agent chat interactions
@@ -1121,7 +1154,9 @@ class JulesTUI:
             elif style_type == "step_card":
                 style = curses.color_pair(4) | curses.A_BOLD
             elif style_type == "file_update":
-                style = curses.color_pair(10) | curses.A_BOLD
+                style = curses.color_pair(12) | curses.A_BOLD
+            elif style_type == "file_item":
+                style = curses.color_pair(10)
 
             try:
                 self.stdscr.addstr(y, start_x + 2, text[:width-4], style)
