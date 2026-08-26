@@ -82,6 +82,19 @@ def save_chat_history(data):
     except Exception:
         pass
 
+def wrap_multiline_text(text, width):
+    wrapped = []
+    for paragraph in str(text).splitlines():
+        if not paragraph.strip():
+            wrapped.append("")
+        else:
+            lines = textwrap.wrap(paragraph, width=max(15, width), break_long_words=True, break_on_hyphens=False)
+            if lines:
+                wrapped.extend(lines)
+            else:
+                wrapped.append("")
+    return wrapped if wrapped else [""]
+
 def load_prompts_map():
     if os.path.isfile(PROMPTS_DATA_FILE):
         try:
@@ -654,16 +667,15 @@ class JulesTUI:
 
     def _get_full_prompt(self, session):
         """Retrieve full untruncated prompt description if available."""
-        sid = session.get("id", "")
+        self.prompts_map = load_prompts_map()
+        sid = str(session.get("id", "")).strip()
         if sid in self.prompts_map and self.prompts_map[sid]:
             return self.prompts_map[sid]
         
-        raw_desc = session.get("description", "")
-        # Clean trailing ellipsis
+        raw_desc = str(session.get("description", "")).strip()
         clean = re.sub(r"[…\.]{2,}$", "", raw_desc).strip()
-        # Search by prefix in prompts_map
         for k, v in self.prompts_map.items():
-            if clean and (clean in v or v.startswith(clean[:25])):
+            if clean and (clean in v or v.startswith(clean[:20]) or k == sid):
                 return v
         return raw_desc
 
@@ -1030,31 +1042,32 @@ class JulesTUI:
         # 1. First Chat Bubble: User Initial Prompt (Full, word-wrapped, no truncation)
         full_prompt = self._get_full_prompt(current_sess)
         entries.append(("USER_TAG", f">>> You (Prompt):", "user_msg"))
-        for p_line in textwrap.wrap(full_prompt, width=wrap_w):
+        text_wrap_w = max(20, width - 12)
+        for p_line in wrap_multiline_text(full_prompt, text_wrap_w):
             entries.append(("USER_BODY", f"    {p_line}", "user_body"))
         entries.append(("", "", "empty"))
 
         # 2. Agent Status & Activity
         if "plan" in status_low:
             entries.append(("AGENT_TAG", f"[*] Jules (Planning):", "agent_msg"))
-            for b_line in textwrap.wrap("Inspecting codebase structure on " + current_sess['repo'] + ", analyzing requirements, and building execution steps...", width=wrap_w):
+            for b_line in wrap_multiline_text("Inspecting codebase structure on " + current_sess['repo'] + ", analyzing requirements, and building execution steps...", text_wrap_w):
                 entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
             entries.append(("STEP", f"    Status: [{spinner_char}] Planning & Architecture Analysis", "step_card"))
             entries.append(("", "", "empty"))
         elif "progress" in status_low or "work" in status_low:
             entries.append(("AGENT_TAG", f"[*] Jules (Working):", "agent_msg"))
-            for b_line in textwrap.wrap("Applying code modifications and running automated verification tests in remote VM...", width=wrap_w):
+            for b_line in wrap_multiline_text("Applying code modifications and running automated verification tests in remote VM...", text_wrap_w):
                 entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
             entries.append(("STEP", f"    Status: [{spinner_char}] Working - Verification and pre-commit checks", "step_card"))
             entries.append(("", "", "empty"))
         elif "complet" in status_low or "done" in status_low or "success" in status_low:
             entries.append(("AGENT_TAG", f"[*] Jules (Completed):", "agent_msg"))
-            for b_line in textwrap.wrap("Task completed successfully. All verification tests passed. Patch is ready to pull and apply.", width=wrap_w):
+            for b_line in wrap_multiline_text("Task completed successfully. All verification tests passed. Patch is ready to pull and apply.", text_wrap_w):
                 entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
             entries.append(("", "", "empty"))
         elif "fail" in status_low or "error" in status_low:
             entries.append(("AGENT_TAG", f"[*] Jules (Issue):", "agent_msg"))
-            for b_line in textwrap.wrap("Task execution stopped or encountered failures during automated checks.", width=wrap_w):
+            for b_line in wrap_multiline_text("Task execution stopped or encountered failures during automated checks.", text_wrap_w):
                 entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
             entries.append(("", "", "empty"))
 
@@ -1075,11 +1088,11 @@ class JulesTUI:
             ts = msg.get("time", "")
             if sender.lower() == "you":
                 entries.append(("USER_TAG", f">>> You ({ts}):", "user_msg"))
-                for m_line in textwrap.wrap(text, width=wrap_w):
+                for m_line in wrap_multiline_text(text, text_wrap_w):
                     entries.append(("USER_BODY", f"    {m_line}", "user_body"))
             else:
                 entries.append(("AGENT_TAG", f"[*] Jules ({ts}):", "agent_msg"))
-                for m_line in textwrap.wrap(text, width=wrap_w):
+                for m_line in wrap_multiline_text(text, text_wrap_w):
                     entries.append(("AGENT_BODY", f"    {m_line}", "agent_body"))
             entries.append(("", "", "empty"))
 
