@@ -23,6 +23,25 @@ CONFIG_DIR = os.path.expanduser("~/.config/jules-tui")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 SESSIONS_DATA_FILE = os.path.join(CONFIG_DIR, "sessions_chat.json")
 PROMPTS_DATA_FILE = os.path.join(CONFIG_DIR, "prompts.json")
+STEPS_DATA_FILE = os.path.join(CONFIG_DIR, "session_steps.json")
+
+def load_session_steps():
+    if os.path.isfile(STEPS_DATA_FILE):
+        try:
+            with open(STEPS_DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_session_steps(data):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(STEPS_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
 
 SUPPORTED_MODELS = [
     "Default (Auto - Jules Managed)",
@@ -561,6 +580,8 @@ class JulesTUI:
         self.activity_log = []
         self.chat_history = load_chat_history()
         self.prompts_map = load_prompts_map()
+        self.session_steps = load_session_steps()
+        self.timeline_auto_scroll = True
         self.session_discovery_time = {}
         self.session_previous_status = {}
         
@@ -770,6 +791,41 @@ class JulesTUI:
                         sid = s["id"]
                         if sid not in self.session_discovery_time:
                             self.session_discovery_time[sid] = now_str
+                        
+                        # Track step event transitions in persistent step log
+                        st = s["status"]
+                        if sid not in self.session_steps:
+                            self.session_steps[sid] = []
+                            self.session_steps[sid].append({
+                                "time": now_str,
+                                "status": "Planning",
+                                "title": f"Planning & Architecture Analysis ({self.default_model})",
+                                "desc": f"Inspecting codebase on {s['repo']}, analyzing requirements, and building execution subtasks..."
+                            })
+                            save_session_steps(self.session_steps)
+                        
+                        old_st = self.session_previous_status.get(sid)
+                        if old_st and old_st.lower() != st.lower():
+                            step_title = f"{st} Step"
+                            step_desc = f"Transitioned to {st} on remote VM."
+                            if "work" in st.lower() or "progress" in st.lower():
+                                step_title = "Implementation & Pre-commit Step"
+                                step_desc = "Applying code modifications and executing automated verification tests..."
+                            elif "complet" in st.lower() or "done" in st.lower():
+                                step_title = "Verification & Completion Step"
+                                step_desc = "All verification tests passed. Git patch ready to pull & apply."
+                            elif "fail" in st.lower():
+                                step_title = "Execution Halted"
+                                step_desc = "Encountered failure during automated verification checks."
+                            
+                            self.session_steps[sid].append({
+                                "time": now_str,
+                                "status": st,
+                                "title": step_title,
+                                "desc": step_desc
+                            })
+                            save_session_steps(self.session_steps)
+
                         self.session_previous_status[sid] = s["status"]
 
                     self.sessions = sessions
@@ -1076,29 +1132,30 @@ class JulesTUI:
             entries.append(("USER_BODY", f"    {p_line}", "user_body"))
         entries.append(("", "", "empty"))
 
-        # 2. Agent Status & Activity
-        if "plan" in status_low:
-            entries.append(("AGENT_TAG", f"[*] Jules (Planning with {model_name}):", "agent_msg"))
-            for b_line in wrap_multiline_text("Inspecting codebase structure on " + current_sess['repo'] + ", analyzing requirements, and building execution steps...", text_wrap_w):
-                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
-            entries.append(("STEP", f"    Status: [{spinner_char}] Planning & Architecture Analysis", "step_card"))
+        # 2. Sequential Agent Step Event Stream / Progress Log
+        steps = self.session_steps.get(sess_id, [])
+        if not steps:
+            # Fallback default initial step
+            entries.append(("AGENT_TAG", f"[*] Jules ({current_sess['status']} with {model_name}):", "agent_msg"))
+            entries.append(("AGENT_BODY", f"    Analyzing requirements and inspecting {current_sess['repo']}...", "agent_body"))
+            entries.append(("STEP", f"    Status: [{spinner_char}] {current_sess['status']}", "step_card"))
             entries.append(("", "", "empty"))
-        elif "progress" in status_low or "work" in status_low:
-            entries.append(("AGENT_TAG", f"[*] Jules (Working with {model_name}):", "agent_msg"))
-            for b_line in wrap_multiline_text("Applying code modifications and running automated verification tests in remote VM...", text_wrap_w):
-                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
-            entries.append(("STEP", f"    Status: [{spinner_char}] Working - Verification and pre-commit checks", "step_card"))
-            entries.append(("", "", "empty"))
-        elif "complet" in status_low or "done" in status_low or "success" in status_low:
-            entries.append(("AGENT_TAG", f"[*] Jules (Completed):", "agent_msg"))
-            for b_line in wrap_multiline_text("Task completed successfully. All verification tests passed. Patch is ready to pull and apply.", text_wrap_w):
-                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
-            entries.append(("", "", "empty"))
-        elif "fail" in status_low or "error" in status_low:
-            entries.append(("AGENT_TAG", f"[*] Jules (Issue):", "agent_msg"))
-            for b_line in wrap_multiline_text("Task execution stopped or encountered failures during automated checks.", text_wrap_w):
-                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
-            entries.append(("", "", "empty"))
+        else:
+            for step_idx, st_entry in enumerate(steps, 1):
+                st_time = st_entry.get("time", "")
+                st_title = st_entry.get("title", f"Step {step_idx}")
+                st_desc = st_entry.get("desc", "")
+                st_status = st_entry.get("status", "")
+                
+                is_latest = (step_idx == len(steps))
+                spin = f"[{spinner_char}] " if (is_latest and ("plan" in st_status.lower() or "progress" in st_status.lower() or "work" in st_status.lower())) else ""
+                
+                entries.append(("STEP_TAG", f"[*] Jules Step {step_idx} ({st_time}) - {st_title}:", "agent_msg"))
+                for b_line in wrap_multiline_text(st_desc, text_wrap_w):
+                    entries.append(("STEP_BODY", f"    {b_line}", "agent_body"))
+                if is_latest and spin:
+                    entries.append(("STEP_CARD", f"    Current Status: {spin}{st_status}", "step_card"))
+                entries.append(("", "", "empty"))
 
         # 3. Modified files with Added/Deleted Line Diff Stats
         diff_text = self.diff_cache.get(sess_id)
@@ -1130,10 +1187,13 @@ class JulesTUI:
                     entries.append(("AGENT_BODY", f"    {m_line}", "agent_body"))
             entries.append(("", "", "empty"))
 
-        # Render timeline list with scrolling
+        # Render timeline list with sticky auto-scroll to bottom
         total_items = len(entries)
         max_scroll = max(0, total_items - timeline_height)
-        self.timeline_scroll_y = min(self.timeline_scroll_y, max_scroll)
+        if self.timeline_auto_scroll:
+            self.timeline_scroll_y = max_scroll
+        else:
+            self.timeline_scroll_y = max(0, min(self.timeline_scroll_y, max_scroll))
 
         view_y = start_y + 1
         for row_i in range(timeline_height):
@@ -1550,17 +1610,24 @@ class JulesTUI:
 
     def _handle_timeline_input(self, ch):
         if ch in (curses.KEY_UP, ord('k')):
+            self.timeline_auto_scroll = False
             self.timeline_scroll_y = max(0, self.timeline_scroll_y - 1)
         elif ch in (curses.KEY_DOWN, ord('j')):
             self.timeline_scroll_y += 1
+            # Check if reached bottom
+            if self.filtered_sessions:
+                # If scrolling down to bottom, restore auto-scroll
+                self.timeline_auto_scroll = False
         elif ch == curses.KEY_PPAGE:
+            self.timeline_auto_scroll = False
             self.timeline_scroll_y = max(0, self.timeline_scroll_y - 10)
         elif ch == curses.KEY_NPAGE:
             self.timeline_scroll_y += 10
         elif ch in (curses.KEY_HOME, ord('g')):
+            self.timeline_auto_scroll = False
             self.timeline_scroll_y = 0
         elif ch in (curses.KEY_END, ord('G')):
-            self.timeline_scroll_y = 9999
+            self.timeline_auto_scroll = True
         elif ch in (ord('i'), ord('I')):
             self.chat_input_active = True
             self.set_status("Type message for Jules. Press [Enter] to send, [Esc] to cancel.")
@@ -1609,6 +1676,7 @@ class JulesTUI:
                     "time": now_str
                 })
                 save_chat_history(self.chat_history)
+                self.timeline_auto_scroll = True
                 self.log(f"Follow-up for Jules #{sess_id}: {msg}", "info")
                 self.set_status(f"Message logged for session #{sess_id}. Press [c] to continue/teleport.")
                 self.chat_input_text = ""
