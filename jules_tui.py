@@ -543,8 +543,8 @@ class JulesClient:
         except Exception as e:
             return False, str(e)
 
-    def create_session(self, prompt, repo=None, parallel=1, model=None):
-        """Create a new Jules session with optional model selection."""
+    def create_session(self, prompt, repo=None, parallel=1, model=None, system_prompt=None, **kwargs):
+        """Create a new Jules session with optional model selection and system prompt."""
         cmd = [self.jules_bin, "new"]
         if repo:
             cmd.extend(["--repo", repo])
@@ -552,8 +552,14 @@ class JulesClient:
             cmd.extend(["--parallel", str(parallel)])
         
         final_prompt = prompt
-        if model and model != "Default (Auto)":
-            final_prompt = f"[Model Directive: Use {model}]\n{prompt}"
+        directives = []
+        if model and "Auto" not in str(model):
+            directives.append(f"[Model: {model}]")
+        if system_prompt and str(system_prompt).strip():
+            directives.append(f"[System Instructions: {str(system_prompt).strip()}]")
+        
+        if directives:
+            final_prompt = "\n".join(directives) + "\n\n" + prompt
         
         cmd.append(final_prompt)
         try:
