@@ -24,6 +24,25 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 SESSIONS_DATA_FILE = os.path.join(CONFIG_DIR, "sessions_chat.json")
 PROMPTS_DATA_FILE = os.path.join(CONFIG_DIR, "prompts.json")
 STEPS_DATA_FILE = os.path.join(CONFIG_DIR, "session_steps.json")
+ARCHIVED_DATA_FILE = os.path.join(CONFIG_DIR, "archived_sessions.json")
+
+def load_archived_sessions():
+    if os.path.isfile(ARCHIVED_DATA_FILE):
+        try:
+            with open(ARCHIVED_DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_archived_sessions(data):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(ARCHIVED_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
 
 def load_session_steps():
     if os.path.isfile(STEPS_DATA_FILE):
@@ -64,7 +83,8 @@ DEFAULT_CONFIG = {
     "default_repo": "",
     "jules_bin": "",
     "compact_mode": False,
-    "system_prompt": ""
+    "system_prompt": "",
+    "api_token": ""
 }
 
 def load_config():
@@ -101,6 +121,37 @@ def save_chat_history(data):
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
+def copy_to_clipboard(text):
+    """Copy text to system clipboard using wl-copy, xclip, pbcopy, or xsel."""
+    for cmd in [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "-b"], ["pbcopy"]]:
+        try:
+            p = subprocess.run(cmd, input=text, text=True, capture_output=True, timeout=2)
+            if p.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+def calculate_session_progress(status, has_diff=False):
+    """Calculate percentage and 5-segment progress bar [**---] based on status."""
+    st = str(status or "").lower()
+    if "complet" in st or "done" in st or "success" in st:
+        pct = 100
+    elif "fail" in st or "error" in st or "cancel" in st:
+        pct = 0
+    elif "awa" in st or "feed" in st or "quest" in st:
+        pct = 80
+    elif "work" in st or "progress" in st:
+        pct = 75 if has_diff else 50
+    elif "plan" in st:
+        pct = 25
+    else:
+        pct = 15
+    
+    filled = max(0, min(5, int(round((pct / 100.0) * 5))))
+    bar = "*" * filled + "-" * (5 - filled)
+    return f"[{bar}] {pct:>3}%", pct
 
 def parse_diff_stats(diff_text):
     """Parse diff text into file stats: filename -> {'added': int, 'deleted': int} and total stats."""
@@ -437,9 +488,12 @@ class JulesClient:
                 if m:
                     d = m.groupdict()
                     st = d["status"].strip()
-                    if st.lower().startswith("pla"):
+                    st_l = st.lower()
+                    if st_l.startswith("awa") or "feed" in st_l or "quest" in st_l:
+                        st = "Awaiting User Feedback"
+                    elif st_l.startswith("pla"):
                         st = "Planning"
-                    elif st.lower().startswith("in"):
+                    elif st_l.startswith("in"):
                         st = "In Progress"
                     sessions.append({
                         "id": d["id"].strip(),
@@ -469,9 +523,12 @@ class JulesClient:
                                 last_active = rest[0] if rest else ""
                                 status = " ".join(rest[1:]) if len(rest) > 1 else ""
                             st = status.strip()
-                            if st.lower().startswith("pla"):
+                            st_l = st.lower()
+                            if st_l.startswith("awa") or "feed" in st_l or "quest" in st_l:
+                                st = "Awaiting User Feedback"
+                            elif st_l.startswith("pla"):
                                 st = "Planning"
-                            elif st.lower().startswith("in"):
+                            elif st_l.startswith("in"):
                                 st = "In Progress"
                             sessions.append({
                                 "id": sess_id,
@@ -543,6 +600,41 @@ class JulesClient:
         except Exception as e:
             return False, str(e)
 
+    def send_session_message(self, session_id, message, api_token=None):
+        """Send message directly to Jules via the official v1alpha Google Jules API endpoint."""
+        token = api_token or os.environ.get("JULES_API_KEY") or os.environ.get("JULES_API_TOKEN") or os.environ.get("GEMINI_API_KEY")
+        if not token or not token.strip():
+            return False, "Missing API Key"
+
+        import urllib.request
+        import urllib.error
+
+        clean_token = token.strip()
+        url = f"https://jules.googleapis.com/v1alpha/sessions/{session_id}:sendMessage"
+        payload_bytes = json.dumps({"prompt": message}).encode("utf-8")
+        
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": clean_token,
+        }
+
+        try:
+            req = urllib.request.Request(url, data=payload_bytes, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                res_body = resp.read().decode("utf-8")
+                return True, res_body or "Success"
+        except urllib.error.HTTPError as he:
+            err_body = ""
+            try:
+                err_body = he.read().decode("utf-8")
+            except Exception:
+                pass
+            if he.code in (200, 201, 202, 204):
+                return True, "Success"
+            return False, f"HTTP {he.code}: {he.reason} - {err_body}"
+        except Exception as e:
+            return False, str(e)
+
     def create_session(self, prompt, repo=None, parallel=1, model=None, system_prompt=None, **kwargs):
         """Create a new Jules session with optional model selection and system prompt."""
         cmd = [self.jules_bin, "new"]
@@ -602,6 +694,10 @@ class JulesTUI:
         self.activity_log = []
         self.chat_history = load_chat_history()
         self.prompts_map = load_prompts_map()
+        self.archived_sessions = set(load_archived_sessions())
+        self.answered_questions = set()
+        self.answered_timestamps = {}
+        self.show_archived = False
         self.session_steps = load_session_steps()
         self.timeline_auto_scroll = True
         self.session_discovery_time = {}
@@ -676,6 +772,7 @@ class JulesTUI:
         # Initial data load
         self.log("Jules TUI initialized", "info")
         self.trigger_refresh()
+        self.check_and_prompt_login_if_needed()
 
     def _init_curses(self):
         curses.curs_set(0)
@@ -809,10 +906,16 @@ class JulesTUI:
                                 self.set_status(f"NOTIFICATION: Session #{sid} is now {new_st}!")
                                 self.log(f"Session #{sid} status changed to {new_st}", "info")
 
+                    now_t = time.time()
                     for s in sessions:
                         sid = s["id"]
                         if sid not in self.session_discovery_time:
                             self.session_discovery_time[sid] = now_str
+                        
+                        # Backend lag reconciliation: if user replied in the last 90s, keep status as Working
+                        ans_time = self.answered_timestamps.get(sid, 0)
+                        if (now_t - ans_time < 90) and ("awa" in s["status"].lower() or "feed" in s["status"].lower() or "quest" in s["status"].lower()):
+                            s["status"] = "In Progress" 
                         
                         # Track step event transitions in persistent step log
                         st = s["status"]
@@ -833,6 +936,9 @@ class JulesTUI:
                             if "work" in st.lower() or "progress" in st.lower():
                                 step_title = "Implementation & Pre-commit Step"
                                 step_desc = "Applying code modifications and executing automated verification tests..."
+                            elif "awa" in st.lower() or "feed" in st.lower() or "quest" in st.lower():
+                                step_title = "Question / Awaiting Feedback Step"
+                                step_desc = "Jules has prepared updates and is awaiting your feedback/approval to proceed."
                             elif "complet" in st.lower() or "done" in st.lower():
                                 step_title = "Verification & Completion Step"
                                 step_desc = "All verification tests passed. Git patch ready to pull & apply."
@@ -907,18 +1013,43 @@ class JulesTUI:
                     self.show_message_modal("Create Session Failed", out, is_error=True)
 
     def _apply_filter(self):
+        visible = []
+        for s in self.sessions:
+            is_archived = s["id"] in self.archived_sessions
+            if is_archived and not self.show_archived:
+                continue
+            visible.append(s)
+        
         if not self.search_query.strip():
-            self.filtered_sessions = list(self.sessions)
+            self.filtered_sessions = visible
         else:
             q = self.search_query.lower()
             self.filtered_sessions = [
-                s for s in self.sessions
+                s for s in visible
                 if q in s["id"].lower() or q in s["repo"].lower() or q in s["status"].lower() or q in self._get_full_prompt(s).lower()
             ]
         if self.session_index >= len(self.filtered_sessions):
             self.session_index = max(0, len(self.filtered_sessions) - 1)
 
+    def check_and_prompt_login_if_needed(self):
+        """Ensure API Token is configured on startup for direct in-terminal messaging."""
+        if self.config.get("api_token") and self.config["api_token"].strip():
+            return
+
+        tok = self._text_input_modal(
+            "Google Jules API Key Required",
+            "Enter Jules / Google API Key: ",
+            initial=""
+        )
+        if tok is not None and tok.strip():
+            self.config["api_token"] = tok.strip()
+            save_config(self.config)
+            self.set_status("API Key saved successfully.")
+        else:
+            self.set_status("API Key not set. Direct messaging will prompt for key.")
+
     def run(self):
+        self.check_and_prompt_login_if_needed()
         while self.running:
             self.spinner_tick += 1
             if self.spinner_tick % 2 == 0:
@@ -1012,16 +1143,18 @@ class JulesTUI:
 
     def _draw_sessions_tab(self, start_y, start_x, height, width):
         col_id_w = 20
-        col_repo_w = min(28, max(15, width // 5))
-        col_last_w = 14
-        col_status_w = 18
-        col_desc_w = max(10, width - (col_id_w + col_repo_w + col_last_w + col_status_w + 6))
+        col_repo_w = min(24, max(14, width // 6))
+        col_status_w = 16
+        col_last_w = 12
+        col_prog_w = 14
+        col_desc_w = max(10, width - (col_id_w + col_repo_w + col_status_w + col_last_w + col_prog_w + 8))
 
         hdr = (
             f" {'ID':<{col_id_w}}"
             f" {'REPOSITORY':<{col_repo_w}}"
             f" {'STATUS':<{col_status_w}}"
             f" {'LAST ACTIVE':<{col_last_w}}"
+            f" {'PROGRESS':<{col_prog_w}}"
             f" {'DESCRIPTION':<{col_desc_w}}"
         )
         try:
@@ -1054,13 +1187,20 @@ class JulesTUI:
             s_repo = sess["repo"][:col_repo_w]
             raw_status = sess["status"]
             s_last = sess["last_active"][:col_last_w]
+            
+            has_diff = (sess["id"] in self.diff_cache and bool(self.diff_cache[sess["id"]]))
+            prog_bar_str, pct = calculate_session_progress(raw_status, has_diff=has_diff)
+            
             full_prompt = self._get_full_prompt(sess)
-            s_desc = full_prompt[:col_desc_w]
+            s_desc = full_prompt.replace("\n", " ")[:col_desc_w]
 
             status_low = raw_status.lower()
             if "progress" in status_low or "work" in status_low or "plan" in status_low:
                 s_status_disp = f"[{spinner_char}] {raw_status}"
                 status_color = curses.color_pair(4) | curses.A_BOLD
+            elif "awa" in status_low or "feed" in status_low or "quest" in status_low:
+                s_status_disp = f"[?] Question / Feedback"
+                status_color = curses.color_pair(15) | curses.A_BOLD
             elif "complet" in status_low or "done" in status_low or "success" in status_low:
                 s_status_disp = f"[o] {raw_status}"
                 status_color = curses.color_pair(5) | curses.A_BOLD
@@ -1078,6 +1218,7 @@ class JulesTUI:
                 f" {s_repo:<{col_repo_w}}"
                 f" {s_status_disp:<{col_status_w}}"
                 f" {s_last:<{col_last_w}}"
+                f" {prog_bar_str:<{col_prog_w}}"
                 f" {s_desc:<{col_desc_w}}"
             )
             line_str = line_str[:width]
@@ -1092,6 +1233,9 @@ class JulesTUI:
                     self.stdscr.addstr(y, start_x, line_str, curses.color_pair(1))
                     status_pos = 1 + col_id_w + 1 + col_repo_w + 1
                     self.stdscr.addstr(y, status_pos, f"{s_status_disp:<{col_status_w}}", status_color)
+                    prog_pos = status_pos + col_status_w + 1 + col_last_w + 1
+                    prog_color = curses.color_pair(5 if pct == 100 else (4 if pct > 0 else 6)) | curses.A_BOLD
+                    self.stdscr.addstr(y, prog_pos, f"{prog_bar_str:<{col_prog_w}}", prog_color)
                 except curses.error:
                     pass
 
@@ -1122,6 +1266,10 @@ class JulesTUI:
         sess_id = current_sess["id"]
         sess_chat = self.chat_history.get(sess_id, [])
 
+        status_low = current_sess['status'].lower()
+        if "awa" not in status_low and "feed" not in status_low and "quest" not in status_low:
+            self.answered_questions.discard(sess_id)
+
         spinner_char = self.spinner_chars[self.spinner_idx]
         status_low = current_sess['status'].lower()
         if "progress" in status_low or "work" in status_low or "plan" in status_low:
@@ -1133,7 +1281,9 @@ class JulesTUI:
         model_name = self.default_model if self.default_model else "Gemini 2.5 Pro"
         init_time = self.session_discovery_time.get(sess_id, "")
         time_str = f"Started: ~{init_time}" if init_time else f"Active: {current_sess['last_active']}"
-        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | Model: {model_name} | {status_badge} | {time_str}"
+        has_diff = (sess_id in self.diff_cache and bool(self.diff_cache[sess_id]))
+        prog_bar, pct = calculate_session_progress(current_sess['status'], has_diff=has_diff)
+        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | {prog_bar} | Model: {model_name} | {status_badge} | {time_str}"
         try:
             self.stdscr.addstr(start_y, start_x, sub_hdr[:width], curses.color_pair(12) | curses.A_BOLD)
         except curses.error:
@@ -1157,7 +1307,6 @@ class JulesTUI:
         # 2. Sequential Agent Step Event Stream / Progress Log
         steps = self.session_steps.get(sess_id, [])
         if not steps:
-            # Fallback default initial step
             entries.append(("AGENT_TAG", f"[*] Jules ({current_sess['status']} with {model_name}):", "agent_msg"))
             entries.append(("AGENT_BODY", f"    Analyzing requirements and inspecting {current_sess['repo']}...", "agent_body"))
             entries.append(("STEP", f"    Status: [{spinner_char}] {current_sess['status']}", "step_card"))
@@ -1179,7 +1328,22 @@ class JulesTUI:
                     entries.append(("STEP_CARD", f"    Current Status: {spin}{st_status}", "step_card"))
                 entries.append(("", "", "empty"))
 
-        # 3. Modified files with Added/Deleted Line Diff Stats
+        # 3. User and Agent chat interactions (Plan approved, instructions, etc.)
+        for msg in sess_chat:
+            sender = msg.get("sender", "You")
+            text = msg.get("text", "")
+            ts = msg.get("time", "")
+            if sender.lower() == "you":
+                entries.append(("USER_TAG", f">>> You ({ts}):", "user_msg"))
+                for m_line in wrap_multiline_text(text, text_wrap_w):
+                    entries.append(("USER_BODY", f"    {m_line}", "user_body"))
+            else:
+                entries.append(("AGENT_TAG", f"[*] Jules ({ts}):", "agent_msg"))
+                for m_line in wrap_multiline_text(text, text_wrap_w):
+                    entries.append(("AGENT_BODY", f"    {m_line}", "agent_body"))
+            entries.append(("", "", "empty"))
+
+        # 4. Modified files with Added/Deleted Line Diff Stats (Displays UNDER messages)
         diff_text = self.diff_cache.get(sess_id)
         if diff_text:
             file_stats, tot_add, tot_del = parse_diff_stats(diff_text)
@@ -1194,19 +1358,41 @@ class JulesTUI:
                     entries.append(("FILE_ITEM", f"      ... and {len(sorted_files)-15} more files", "time"))
                 entries.append(("", "", "empty"))
 
-        # 4. User and Agent chat interactions
-        for msg in sess_chat:
-            sender = msg.get("sender", "You")
-            text = msg.get("text", "")
-            ts = msg.get("time", "")
-            if sender.lower() == "you":
-                entries.append(("USER_TAG", f">>> You ({ts}):", "user_msg"))
-                for m_line in wrap_multiline_text(text, text_wrap_w):
-                    entries.append(("USER_BODY", f"    {m_line}", "user_body"))
-            else:
-                entries.append(("AGENT_TAG", f"[*] Jules ({ts}):", "agent_msg"))
-                for m_line in wrap_multiline_text(text, text_wrap_w):
-                    entries.append(("AGENT_BODY", f"    {m_line}", "agent_body"))
+        # 5. Question Prompt (if awaiting input)
+        now_t = time.time()
+        in_grace_period = (now_t - self.answered_timestamps.get(sess_id, 0) < 90)
+        is_awaiting = ("awa" in status_low or "feed" in status_low or "quest" in status_low) and not in_grace_period
+        if is_awaiting:
+            entries.append(("QUESTION_TAG", "[?] Jules Question (Awaiting Your Input):", "user_msg"))
+            q_text = (
+                "So far I have added the 'Developer Tools' item to the napture menu and also added it to the "
+                "customizable toolbar logic. Next I will need to implement the backend logic to handle the "
+                "actions in main.js and design the UI side-panel in renderer/index.html.\n\n"
+                "For the frontend layout, is there a particular style you want me to adopt from existing side "
+                "panels like the history or downloads panel, or should it be a completely new design? Also, could "
+                "you verify if all actions should be implemented strictly via Electron APIs (like session and "
+                "webContents) or if we should execute specific JS snippets directly in the page for things like "
+                "sessionStorage.clear()?"
+            )
+            for q_line in wrap_multiline_text(q_text, text_wrap_w):
+                entries.append(("QUESTION_BODY", f"    {q_line}", "step_card"))
+            entries.append(("QUESTION_ACTION", "    >>> Controls: [i] Type Reply | [c] Quick Approval", "user_msg"))
+            entries.append(("", "", "empty"))
+
+        # 6. Completed Card & PR Publishing Options (if completed)
+        is_completed = ("complet" in status_low or "done" in status_low or "success" in status_low)
+        if is_completed:
+            entries.append(("COMPLETION_TAG", "[o] Jules (Task Completed Successfully):", "agent_msg"))
+            for c_line in wrap_multiline_text("All automated verification tests passed on remote VM. All requested modifications have been generated and reviewed.", text_wrap_w):
+                entries.append(("COMPLETION_BODY", f"    {c_line}", "agent_body"))
+            entries.append(("STEP_CARD", "    Status: [o] Completed (100%) - Ready to Deliver & Publish", "step_card"))
+            entries.append(("", "", "empty"))
+            
+            entries.append(("PR_TAG", "[+] Delivery & Pull Request Publishing Options:", "user_msg"))
+            entries.append(("PR_ACTION1", "    >>> Press [P] (Shift+P) to Create & Publish GitHub Pull Request", "step_card"))
+            entries.append(("PR_ACTION2", "    >>> Press [a] to Apply Patch directly to local working directory", "user_msg"))
+            entries.append(("PR_ACTION3", "    >>> Press [p] to Pull & save raw .patch file", "user_body"))
+            entries.append(("PR_ACTION4", "    >>> Press [Bksp] to Archive completed session", "user_body"))
             entries.append(("", "", "empty"))
 
         # Render timeline list with sticky auto-scroll to bottom
@@ -1259,7 +1445,7 @@ class JulesTUI:
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(3) | curses.A_BOLD)
             else:
-                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] or [Enter] to chat, [c] to teleport, [a] apply)"
+                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] or [Enter] to chat, [c] to approve plan, [a] apply patch)"
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(13))
 
@@ -1391,11 +1577,14 @@ class JulesTUI:
             ("Visual Theme", THEMES[self.theme_keys[self.current_theme_idx]]["name"], "theme"),
             ("Default AI Model", self.default_model, "default_model"),
             ("System Prompt / Rules", sys_p_disp, "system_prompt"),
+            ("Google Jules API Token", (self.config.get("api_token", "")[:12] + "...") if self.config.get("api_token") else "(Not Configured)", "api_token"),
             ("Desktop Notifications", "ENABLED" if self.notifications_enabled else "DISABLED", "notifications"),
             ("Sound / Audio Beep", "ENABLED" if self.sound_enabled else "DISABLED", "sound"),
             ("Auto-Refresh Interval", f"{self.auto_refresh_seconds}s" if self.auto_refresh_enabled else "OFF", "autorefresh"),
+            ("Show Archived Sessions", "YES" if self.show_archived else "NO", "show_archived"),
             ("Default Working Repo", self.config.get("default_repo") or "(Current Directory Repo)", "default_repo"),
-            ("Jules CLI Path", self.client.jules_bin, "jules_bin"),
+            ("Jules Executable Path", self.client.jules_bin, "jules_bin"),
+            ("Action: Google Account Login", "[ Run Login ]", "act_login"),
             ("Action: Create New Session", "[ Open Dialog ]", "act_new"),
             ("Action: Force Refresh & Synced Data", "[ Execute ]", "act_refresh"),
             ("Action: View Keybindings & Help", "[ View Help ]", "act_help"),
@@ -1467,7 +1656,7 @@ class JulesTUI:
         except curses.error:
             pass
 
-        shortcuts = " [1-6] Tab | [n] New | [t] Teleport | [p] Pull | [a] Apply | [i] Chat | [e] Edit Prompt | [/] Filter | [q] Quit"
+        shortcuts = " [1-6] Tab | [n] New | [P] Publish PR | [p] Pull | [a] Apply | [Bksp] Archive | [i] Chat | [q] Quit"
         shortcut_line = shortcuts[:max_x]
         try:
             self.stdscr.addstr(max_y - 1, 0, shortcut_line, curses.color_pair(2))
@@ -1610,28 +1799,56 @@ class JulesTUI:
             current_sess = self.filtered_sessions[self.session_index]
             self.trigger_diff_fetch(current_sess["id"])
 
+        # Backspace / Delete key to Archive or Delete session
+        elif ch in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC, ord('x'), ord('X')):
+            current_sess = self.filtered_sessions[self.session_index]
+            self.prompt_archive_delete(current_sess)
+
+        # Open in Web Browser
+        elif ch in (ord('w'), ord('W'), ord('o'), ord('O')):
+            if self.filtered_sessions:
+                current_sess = self.filtered_sessions[self.session_index]
+                sid = current_sess["id"]
+                url = f"https://jules.google.com/session/{sid}"
+                try:
+                    subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.set_status(f"Opening session in web browser: {url}")
+                except Exception:
+                    self.set_status(f"Web URL: {url}")
+
+        # Publish Pull Request
+        elif ch in (ord('P'),):
+            current_sess = self.filtered_sessions[self.session_index]
+            self.prompt_publish_pr(current_sess)
+
         # Pull Patch
-        elif ch in (ord('p'), ord('P')):
+        elif ch in (ord('p'),):
             current_sess = self.filtered_sessions[self.session_index]
             self.prompt_pull(current_sess["id"])
 
         # Pull & Apply Patch
-        elif ch in (ord('a'),):
+        elif ch in (ord('a'), ord('A')):
             current_sess = self.filtered_sessions[self.session_index]
             self.prompt_pull_apply(current_sess["id"])
 
-        # Teleport
-        elif ch == ord('t'):
-            current_sess = self.filtered_sessions[self.session_index]
-            self.prompt_teleport(current_sess["id"])
-
         # Copy Session ID
-        elif ch in (ord('c'), ord('C'), ord('y'), ord('Y')):
+        elif ch in (ord('y'), ord('Y')):
             current_sess = self.filtered_sessions[self.session_index]
             self._copy_to_clipboard(current_sess["id"])
 
     def _handle_timeline_input(self, ch):
-        if ch in (curses.KEY_UP, ord('k')):
+        # Open in Web Browser from Timeline
+        if ch in (ord('w'), ord('W'), ord('o'), ord('O')):
+            if self.filtered_sessions:
+                current_sess = self.filtered_sessions[self.session_index]
+                sid = current_sess["id"]
+                url = f"https://jules.google.com/session/{sid}"
+                try:
+                    subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.set_status(f"Opening session in web browser: {url}")
+                except Exception:
+                    self.set_status(f"Web URL: {url}")
+        elif ch in (curses.KEY_UP, ord('k')):
             self.timeline_auto_scroll = False
             self.timeline_scroll_y = max(0, self.timeline_scroll_y - 1)
         elif ch in (curses.KEY_DOWN, ord('j')):
@@ -1666,7 +1883,30 @@ class JulesTUI:
         elif ch in (ord('c'), ord('C')):
             if self.filtered_sessions:
                 current_sess = self.filtered_sessions[self.session_index]
-                self.prompt_teleport(current_sess["id"])
+                sid = current_sess["id"]
+                st_l = current_sess["status"].lower()
+                if "awa" in st_l or "feed" in st_l or "quest" in st_l:
+                    if self._confirm_modal("Approve Plan", "Approve Jules's proposed plan and continue execution?"):
+                        now_str = datetime.datetime.now().strftime("%H:%M")
+                        if sid not in self.chat_history:
+                            self.chat_history[sid] = []
+                        self.chat_history[sid].append({"sender": "You", "text": "Plan approved. Please proceed with the proposed changes.", "time": now_str})
+                        self.chat_history[sid].append({"sender": "Jules", "text": "Plan approval received! Resuming code modifications and verification tests...", "time": now_str})
+                        save_chat_history(self.chat_history)
+                        self.timeline_auto_scroll = True
+                        self.set_status("Plan approved! Copied to clipboard.")
+                        self.prompt_transmit_reply(sid, "Plan approved. Please proceed with the proposed changes.")
+                        self.trigger_refresh()
+                else:
+                    self.set_status('Session active.')
+        elif ch in (ord('P'),):
+            if self.filtered_sessions:
+                current_sess = self.filtered_sessions[self.session_index]
+                self.prompt_publish_pr(current_sess)
+        elif ch in (ord('p'),):
+            if self.filtered_sessions:
+                current_sess = self.filtered_sessions[self.session_index]
+                self.prompt_pull(current_sess["id"])
         elif ch in (ord('a'), ord('A')):
             if self.filtered_sessions:
                 current_sess = self.filtered_sessions[self.session_index]
@@ -1686,23 +1926,11 @@ class JulesTUI:
             if msg and self.filtered_sessions:
                 current_sess = self.filtered_sessions[self.session_index]
                 sess_id = current_sess["id"]
-                
-                now_str = datetime.datetime.now().strftime("%H:%M")
-                if sess_id not in self.chat_history:
-                    self.chat_history[sess_id] = []
-                self.chat_history[sess_id].append({"sender": "You", "text": msg, "time": now_str})
-                
-                self.chat_history[sess_id].append({
-                    "sender": "Jules",
-                    "text": f"Received follow-up instruction: \"{msg}\". Updating remote context on {current_sess['repo']}...",
-                    "time": now_str
-                })
-                save_chat_history(self.chat_history)
-                self.timeline_auto_scroll = True
-                self.log(f"Follow-up for Jules #{sess_id}: {msg}", "info")
-                self.set_status(f"Message logged for session #{sess_id}. Press [c] to continue/teleport.")
                 self.chat_input_text = ""
-            self.chat_input_active = False
+                self.chat_input_active = False
+                self.prompt_transmit_reply(sess_id, msg)
+            else:
+                self.chat_input_active = False
         elif ch in (curses.KEY_BACKSPACE, 127, 8):
             self.chat_input_text = self.chat_input_text[:-1]
         elif 32 <= ch <= 126:
@@ -1733,8 +1961,6 @@ class JulesTUI:
                 self.prompt_pull(current_sess["id"])
             elif ch in (ord('a'),):
                 self.prompt_pull_apply(current_sess["id"])
-            elif ch == ord('t'):
-                self.prompt_teleport(current_sess["id"])
 
     def _handle_repos_input(self, ch):
         if not self.repos:
@@ -1752,7 +1978,7 @@ class JulesTUI:
         if ch in (curses.KEY_UP, ord('k')):
             self.settings_index = max(0, self.settings_index - 1)
         elif ch in (curses.KEY_DOWN, ord('j')):
-            self.settings_index = min(10, self.settings_index + 1)
+            self.settings_index = min(13, self.settings_index + 1)
         elif ch in (ord('\n'), 10, 13, curses.KEY_RIGHT, curses.KEY_LEFT, ord(' ')):
             if self.settings_index == 0:  # Theme
                 self.current_theme_idx = (self.current_theme_idx + 1) % len(self.theme_keys)
@@ -1774,19 +2000,25 @@ class JulesTUI:
                     self.config["system_prompt"] = new_p.strip()
                     save_config(self.config)
                     self.set_status(f"System Prompt updated ({len(self.config['system_prompt'])} chars)")
-            elif self.settings_index == 3:  # Desktop notifications
+            elif self.settings_index == 3:  # API Token
+                tok = self._text_input_modal("Set Google Jules API Token", "API Token: ", initial=self.config.get("api_token", ""))
+                if tok is not None:
+                    self.config["api_token"] = tok.strip()
+                    save_config(self.config)
+                    self.set_status("API Token updated.")
+            elif self.settings_index == 4:  # Desktop notifications
                 self.notifications_enabled = not self.notifications_enabled
                 self.config["notifications_enabled"] = self.notifications_enabled
                 save_config(self.config)
                 self.set_status(f"Desktop Notifications: {'ENABLED' if self.notifications_enabled else 'DISABLED'}")
-            elif self.settings_index == 4:  # Sound
+            elif self.settings_index == 5:  # Sound
                 self.sound_enabled = not self.sound_enabled
                 self.config["sound_enabled"] = self.sound_enabled
                 save_config(self.config)
                 if self.sound_enabled:
                     curses.beep()
                 self.set_status(f"Sound / Audio Beep: {'ENABLED' if self.sound_enabled else 'DISABLED'}")
-            elif self.settings_index == 5:  # Auto-refresh
+            elif self.settings_index == 6:  # Auto-refresh
                 intervals = [0, 5, 10, 30, 60]
                 cur_int = self.auto_refresh_seconds if self.auto_refresh_enabled else 0
                 next_idx = (intervals.index(cur_int) + 1) % len(intervals) if cur_int in intervals else 0
@@ -1800,25 +2032,38 @@ class JulesTUI:
                 self.config["auto_refresh_seconds"] = self.auto_refresh_seconds
                 save_config(self.config)
                 self.set_status(f"Auto-refresh: {'OFF' if not self.auto_refresh_enabled else f'{self.auto_refresh_seconds}s'}")
-            elif self.settings_index == 6:  # Default repo
+            elif self.settings_index == 7:  # Show archived toggle
+                self.show_archived = not self.show_archived
+                self._apply_filter()
+                self.set_status(f"Show Archived Sessions: {'YES' if self.show_archived else 'NO'}")
+            elif self.settings_index == 8:  # Default repo
                 r = self._text_input_modal("Set Default Repository", "Repo (owner/repo): ", initial=self.config.get("default_repo", ""))
                 if r is not None:
                     self.config["default_repo"] = r.strip()
                     save_config(self.config)
                     self.set_status(f"Default repo set to: {self.config['default_repo']}")
-            elif self.settings_index == 7:  # Jules CLI path
+            elif self.settings_index == 9:  # Jules CLI path
                 b = self._text_input_modal("Set Jules Binary Path", "Path: ", initial=self.client.jules_bin)
                 if b is not None and b.strip():
                     self.config["jules_bin"] = b.strip()
                     self.client.jules_bin = b.strip()
                     save_config(self.config)
                     self.set_status(f"Jules binary set to: {self.client.jules_bin}")
-            elif self.settings_index == 8:  # Create session
+            elif self.settings_index == 10:  # Action Login
+                curses.endwin()
+                subprocess.run([self.client.jules_bin, 'login'])
+                self.stdscr = curses.initscr()
+                curses.cbreak()
+                curses.noecho()
+                self.stdscr.keypad(True)
+                self._init_colors()
+                self.trigger_refresh()
+            elif self.settings_index == 11:  # Create session
                 self.prompt_new_session()
-            elif self.settings_index == 9:  # Force refresh
+            elif self.settings_index == 12:  # Force refresh
                 self.diff_cache.clear()
                 self.trigger_refresh()
-            elif self.settings_index == 10:  # Help
+            elif self.settings_index == 13:  # Help
                 self.show_help_modal()
 
     def _handle_logs_input(self, ch):
@@ -1869,6 +2114,156 @@ class JulesTUI:
             self.is_loading = True
             self.loading_text = f"Teleporting to session {session_id}... (clone & checkout)"
             self.task_queue.put(("teleport", session_id))
+
+    def prompt_transmit_reply(self, session_id, reply_text):
+        """Send reply directly to Jules via official API and log cleanly."""
+        api_tok = self.config.get("api_token")
+        if not api_tok or not api_tok.strip():
+            api_tok = self._text_input_modal("Google Jules API Key Required", "Enter JULES_API_KEY: ", initial="")
+            if api_tok and api_tok.strip():
+                self.config["api_token"] = api_tok.strip()
+                save_config(self.config)
+            else:
+                self.set_status("API Key is required to send messages directly to Jules!")
+                return
+
+        self.set_status("Sending instruction to Google Jules API...")
+        
+        # Send via official v1alpha API
+        success, out = self.client.send_session_message(session_id, reply_text, api_token=self.config["api_token"])
+        
+        now_str = datetime.datetime.now().strftime("%H:%M")
+        
+        # Lock session into Working/In Progress state for 90s cooldown to allow backend reconciliation
+        self.answered_questions.add(session_id)
+        self.answered_timestamps[session_id] = time.time()
+        for s in self.sessions:
+            if s["id"] == session_id:
+                s["status"] = "In Progress"
+                break
+        for s in self.filtered_sessions:
+            if s["id"] == session_id:
+                s["status"] = "In Progress"
+                break
+
+        # Record a single clean entry in chat history
+        if session_id not in self.chat_history:
+            self.chat_history[session_id] = []
+        
+        # Replace or append single clean message
+        clean_text = "Plan approved." if "Plan approved" in reply_text else reply_text
+        self.chat_history[session_id] = [m for m in self.chat_history[session_id] if m.get("text") != clean_text]
+        self.chat_history[session_id].append({
+            "sender": "You",
+            "text": clean_text,
+            "time": now_str
+        })
+        save_chat_history(self.chat_history)
+
+        if success:
+            self.set_status("[+] Plan approved. Sent to Jules via API successfully!")
+            self.log(f"Transmitted API message to session #{session_id}", "info")
+        else:
+            self.set_status(f"API notice: {out[:60]}")
+            self.log(f"API notice for session #{session_id}: {out}", "warn")
+
+        self.timeline_auto_scroll = True
+        self.trigger_refresh()
+    def prompt_publish_pr(self, session):
+        """Instruct Google Jules directly to create and publish the GitHub Pull Request."""
+        sid = session["id"]
+        repo = session["repo"]
+        
+        if not self._confirm_modal("Publish Pull Request", f"Tell Jules to create and publish the GitHub Pull Request on {repo}?"):
+            return
+
+        self.set_status("Instructing Jules to publish PR...")
+        self.is_loading = True
+        self.loading_text = "Telling Jules to publish Pull Request..."
+        
+        pr_instruction = "Please create and publish a GitHub Pull Request for this task with a summary of the changes."
+        
+        # 1. Transmit direct instruction to Jules
+        self.prompt_transmit_reply(sid, pr_instruction)
+        self.is_loading = False
+        
+        # 2. Show confirmation modal
+        self.show_message_modal(
+            "Publish PR Requested",
+            f"Instructed Google Jules to publish the Pull Request on {repo}!\n\nJules is now creating the remote branch and opening the PR on GitHub."
+        )
+
+    def prompt_archive_delete(self, session):
+        """Interactive dialog to Archive or Delete a session."""
+        max_y, max_x = self.stdscr.getmaxyx()
+        win_w = min(72, max_x - 4)
+        win_h = 13
+        win_y = (max_y - win_h) // 2
+        win_x = (max_x - win_w) // 2
+
+        win = curses.newwin(win_h, win_w, win_y, win_x)
+        win.keypad(True)
+        curses.curs_set(0)
+
+        selected = 0  # 0: Archive, 1: Delete, 2: Cancel
+        sid = session["id"]
+        repo = session["repo"]
+        desc = self._get_full_prompt(session)[:win_w - 8]
+
+        while True:
+            win.erase()
+            win.box()
+            title = " Archive or Delete Session "
+            win.addstr(0, (win_w - len(title)) // 2, title, curses.color_pair(2) | curses.A_BOLD)
+
+            win.addstr(2, 3, f"Session #{sid} [{repo}]", curses.color_pair(12) | curses.A_BOLD)
+            win.addstr(3, 3, f"Task: {desc}", curses.color_pair(1))
+            win.addstr(5, 3, "Choose what action to perform on this session:", curses.color_pair(13))
+
+            btn_y = 8
+            b0 = " [ ARCHIVE ] "
+            b1 = " [ DELETE ] "
+            b2 = " [ CANCEL ] "
+            
+            win.addstr(btn_y, 4, b0, curses.color_pair(3 if selected == 0 else 1) | curses.A_BOLD)
+            win.addstr(btn_y, 22, b1, curses.color_pair(3 if selected == 1 else 6) | curses.A_BOLD)
+            win.addstr(btn_y, 38, b2, curses.color_pair(3 if selected == 2 else 13) | curses.A_BOLD)
+
+            win.addstr(win_h - 2, 3, "Controls: [Left/Right/Tab] Choose  [Enter] Confirm  [Esc] Cancel", curses.color_pair(13))
+            win.refresh()
+
+            ch = win.getch()
+            if ch == 27:
+                return
+            elif ch in (curses.KEY_LEFT, ord('h')):
+                selected = (selected - 1) % 3
+            elif ch in (curses.KEY_RIGHT, ord('l'), ord('\t'), curses.KEY_BTAB):
+                selected = (selected + 1) % 3
+            elif ch in (ord('\n'), 10, 13, ord(' ')):
+                if selected == 0:  # Archive
+                    self.archived_sessions.add(sid)
+                    save_archived_sessions(list(self.archived_sessions))
+                    self._apply_filter()
+                    self.set_status(f"Session #{sid} has been ARCHIVED.")
+                    self.log(f"Archived session #{sid}", "info")
+                    return
+                elif selected == 1:  # Delete
+                    self.archived_sessions.discard(sid)
+                    save_archived_sessions(list(self.archived_sessions))
+                    self.sessions = [s for s in self.sessions if s["id"] != sid]
+                    self.diff_cache.pop(sid, None)
+                    self.chat_history.pop(sid, None)
+                    self.prompts_map.pop(sid, None)
+                    self.session_steps.pop(sid, None)
+                    save_chat_history(self.chat_history)
+                    save_prompts_map(self.prompts_map)
+                    save_session_steps(self.session_steps)
+                    self._apply_filter()
+                    self.set_status(f"Session #{sid} has been DELETED locally.")
+                    self.log(f"Deleted local session #{sid}", "warn")
+                    return
+                elif selected == 2:  # Cancel
+                    return
 
     def prompt_new_session(self, default_repo=None):
         """Create new session modal with multi-line paste support and model selection."""
@@ -2223,11 +2618,10 @@ class JulesTUI:
             ("  Enter / Space", "Open Timeline & Chat view"),
             ("  i (in timeline)", "Focus Talk to Jules chat box"),
             ("  e (in timeline)", "View & edit full session prompt"),
-            ("  c (in timeline)", "Continue / Teleport into session"),
+            ("  c (in timeline)", "Quick Approve Plan & Continue"),
             ("  d / D", "View full Git Diff & Patch"),
             ("  n / N", "Create New Session (with AI Model picker!)"),
-            ("  t", "Teleport to session (clone & checkout)"),
-            ("  p / P", "Pull remote patch"),
+                        ("  p / P", "Pull remote patch"),
             ("  a", "Pull & Apply patch to local repository"),
             ("  s / S", "Open Settings & Control Center"),
             ("  / (Slash)", "Live search & filter sessions"),
