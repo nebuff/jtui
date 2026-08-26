@@ -8,6 +8,12 @@ I got fed up with the basic google jules webui so I made a nice UI
 
 ## Quick Start
 
+### Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nebuff/jtui/main/install.sh | bash
+```
+
 ### Run directly:
 ```bash
 jules-tui
@@ -45,7 +51,7 @@ jtui
 
 ## Requirements
 
-- **Python 3.8+** (preinstalled on virtually all Unix systems)
+- **Python 3.8+**
 - **Google Jules CLI** (`jules` installed in PATH or `~/.local/bin/jules`)
 - *(Optional)* `notify-send` (Linux) / `osascript` (macOS) for desktop notifications
 - *(Optional)* `xclip`, `wl-copy`, or `pbcopy` for clipboard copying
