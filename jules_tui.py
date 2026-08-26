@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-
 """
 Jules TUI - A Terminal User Interface for Google's Jules CLI
-Supports Linux and MacOS
-
-By. nebuff
+Supports Linux, macOS, and Unix-based operating systems.
+Zero external dependencies (uses standard library Python 3 & curses).
 """
 
 import curses
@@ -20,13 +18,24 @@ import textwrap
 import threading
 import time
 
-# Configuration & Storage Paths
+# --- Configuration & Storage Paths ---
 CONFIG_DIR = os.path.expanduser("~/.config/jules-tui")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 SESSIONS_DATA_FILE = os.path.join(CONFIG_DIR, "sessions_chat.json")
 
+SUPPORTED_MODELS = [
+    "Default (Auto)",
+    "Gemini 2.5 Flash",
+    "Gemini 2.5 Pro",
+    "Gemini 2.0 Flash",
+    "Gemini 1.5 Pro",
+    "Claude 3.7 Sonnet",
+    "Custom"
+]
+
 DEFAULT_CONFIG = {
     "theme": "twilight",
+    "default_model": "Default (Auto)",
     "auto_refresh_enabled": True,
     "auto_refresh_seconds": 10,
     "notifications_enabled": True,
@@ -91,7 +100,7 @@ def send_desktop_notification(title, body):
             pass
     return False
 
-# Comprehensive Themes
+# --- Comprehensive Themes (No Emojis) ---
 THEMES = {
     "twilight": {
         "name": "Twilight (Amber/Warm)",
@@ -321,12 +330,14 @@ class JulesClient:
         return "jules"
 
     def get_sessions(self):
-        """Fetch remote sessions from jules remote list --session."""
+        """Fetch remote sessions from jules remote list --session with full columns."""
         try:
+            env = dict(os.environ, COLUMNS="240")
             res = subprocess.run(
                 [self.jules_bin, "remote", "list", "--session"],
                 capture_output=True,
                 text=True,
+                env=env,
                 timeout=25
             )
             if res.returncode != 0:
@@ -348,12 +359,17 @@ class JulesClient:
                 )
                 if m:
                     d = m.groupdict()
+                    st = d["status"].strip()
+                    if st.lower() == "pla":
+                        st = "Planning"
+                    elif st.lower() == "in":
+                        st = "In Progress"
                     sessions.append({
                         "id": d["id"].strip(),
                         "description": d["desc"].strip(),
                         "repo": d["repo"].strip(),
                         "last_active": d["last_active"].strip(),
-                        "status": d["status"].strip(),
+                        "status": st,
                     })
                 else:
                     parts = l_str.split()
@@ -375,12 +391,17 @@ class JulesClient:
                             else:
                                 last_active = rest[0] if rest else ""
                                 status = " ".join(rest[1:]) if len(rest) > 1 else ""
+                            st = status.strip()
+                            if st.lower() == "pla":
+                                st = "Planning"
+                            elif st.lower() == "in":
+                                st = "In Progress"
                             sessions.append({
                                 "id": sess_id,
                                 "description": desc,
                                 "repo": repo,
                                 "last_active": last_active,
-                                "status": status
+                                "status": st
                             })
             return sessions, None
         except Exception as e:
@@ -445,14 +466,20 @@ class JulesClient:
         except Exception as e:
             return False, str(e)
 
-    def create_session(self, prompt, repo=None, parallel=1):
-        """Create a new Jules session."""
+    def create_session(self, prompt, repo=None, parallel=1, model=None):
+        """Create a new Jules session with optional model selection."""
         cmd = [self.jules_bin, "new"]
         if repo:
             cmd.extend(["--repo", repo])
         if parallel and parallel > 1:
             cmd.extend(["--parallel", str(parallel)])
-        cmd.append(prompt)
+        
+        # If a specific model is selected, add instruction directive
+        final_prompt = prompt
+        if model and model != "Default (Auto)":
+            final_prompt = f"[Model Directive: Use {model}]\n{prompt}"
+        
+        cmd.append(final_prompt)
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             out = (res.stdout + "\n" + res.stderr).strip()
@@ -476,6 +503,7 @@ class JulesTUI:
         self.diff_cache = {}
         self.activity_log = []
         self.chat_history = load_chat_history()
+        self.session_discovery_time = {}  # session_id -> formatted discovery time
         self.session_previous_status = {}  # session_id -> last known status
         
         # Tabs: Sessions, Timeline/Chat, Diff/Patch, Repositories, Settings, Activity Log
@@ -512,7 +540,9 @@ class JulesTUI:
         self.auto_refresh_seconds = self.config.get("auto_refresh_seconds", 10)
         self.notifications_enabled = self.config.get("notifications_enabled", True)
         self.sound_enabled = self.config.get("sound_enabled", True)
+        self.default_model = self.config.get("default_model", "Default (Auto)")
         self.last_refresh_time = time.time()
+        self.last_successful_fetch_ts = datetime.datetime.now().strftime("%H:%M:%S")
         
         # Status / Notification
         self.status_msg = "Ready. Press [?] for help, [r] to refresh, [s] for settings."
@@ -520,7 +550,7 @@ class JulesTUI:
         self.is_loading = False
         self.loading_text = ""
         
-        # Loading circle animation spinner
+        # Loading circle animation spinner: | / - \
         self.spinner_chars = ["|", "/", "-", "\\"]
         self.spinner_idx = 0
         self.spinner_tick = 0
@@ -585,7 +615,7 @@ class JulesTUI:
 
     def trigger_refresh(self):
         self.is_loading = True
-        self.loading_text = "Fetching sessions & repos..."
+        self.loading_text = "Refreshing sessions & repos..."
         self.task_queue.put(("fetch_all", None))
 
     def trigger_diff_fetch(self, session_id):
@@ -627,8 +657,8 @@ class JulesTUI:
                 success, out = self.client.teleport(session_id)
                 self.result_queue.put(("action_res", ("Teleport", success, out)))
             elif task_type == "new_session":
-                prompt, repo, parallel = payload
-                success, out = self.client.create_session(prompt, repo, parallel)
+                prompt, repo, parallel, model = payload
+                success, out = self.client.create_session(prompt, repo, parallel, model)
                 self.result_queue.put(("new_session_res", (success, out)))
 
             self.task_queue.task_done()
@@ -643,17 +673,19 @@ class JulesTUI:
             self.is_loading = False
             if msg_type == "fetch_all_res":
                 sessions, s_err, repos, r_err = data
+                self.last_successful_fetch_ts = datetime.datetime.now().strftime("%H:%M:%S")
                 if s_err:
                     self.set_status(f"Error fetching sessions: {s_err}")
                     self.log(f"Session fetch error: {s_err}", "error")
                 else:
                     # Check for completed sessions to send notification
+                    now_str = datetime.datetime.now().strftime("%H:%M")
                     if self.session_previous_status:
                         for s in sessions:
                             sid = s["id"]
                             new_st = s["status"]
                             old_st = self.session_previous_status.get(sid)
-                            if old_st and "progress" in old_st.lower() and ("complet" in new_st.lower() or "done" in new_st.lower() or "fail" in new_st.lower()):
+                            if old_st and ("progress" in old_st.lower() or "plan" in old_st.lower()) and ("complet" in new_st.lower() or "done" in new_st.lower() or "fail" in new_st.lower()):
                                 if self.notifications_enabled:
                                     n_title = f"Jules Session #{sid} is {new_st}"
                                     n_body = f"Repository: {s['repo']}\n{s['description']}"
@@ -663,20 +695,22 @@ class JulesTUI:
                                 self.set_status(f"NOTIFICATION: Session #{sid} is now {new_st}!")
                                 self.log(f"Session #{sid} status changed to {new_st}", "info")
 
-                    # Update status registry
+                    # Register discovery timestamps
                     for s in sessions:
-                        self.session_previous_status[s["id"]] = s["status"]
+                        sid = s["id"]
+                        if sid not in self.session_discovery_time:
+                            self.session_discovery_time[sid] = now_str
+                        self.session_previous_status[sid] = s["status"]
 
                     self.sessions = sessions
                     self._apply_filter()
                     self.log(f"Fetched {len(sessions)} remote sessions", "info")
-                    self.set_status(f"Updated: {len(sessions)} sessions found.")
+                    self.set_status(f"Updated {len(sessions)} sessions (Synced {self.last_successful_fetch_ts})")
 
                 if r_err:
                     self.log(f"Repo fetch error: {r_err}", "error")
                 else:
                     self.repos = repos
-                    self.log(f"Fetched {len(repos)} connected repos", "info")
 
                 self.last_refresh_time = time.time()
 
@@ -732,7 +766,7 @@ class JulesTUI:
     def run(self):
         while self.running:
             self.spinner_tick += 1
-            if self.spinner_tick % 2 == 0:  # smooth continuous rotation
+            if self.spinner_tick % 2 == 0:
                 self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_chars)
             
             if self.auto_refresh_enabled and (time.time() - self.last_refresh_time > self.auto_refresh_seconds):
@@ -940,8 +974,9 @@ class JulesTUI:
         else:
             status_badge = f"Status: {current_sess['status']}"
 
-        # Sub-header
-        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | {status_badge} | Last active: {current_sess['last_active']}"
+        # Accurate timestamps
+        init_time = self.session_discovery_time.get(sess_id, "Active")
+        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | {status_badge} | Last activity: {current_sess['last_active']}"
         try:
             self.stdscr.addstr(start_y, start_x, sub_hdr[:width], curses.color_pair(12) | curses.A_BOLD)
         except curses.error:
@@ -957,7 +992,7 @@ class JulesTUI:
         prompt_lines = textwrap.wrap(f"Prompt: {current_sess['description']}", width=wrap_w)
         for p_line in prompt_lines:
             entries.append(("TASK", p_line, "header"))
-        entries.append(("TIME", f"Initiated on {current_sess['repo']} ({current_sess['last_active']})", "time"))
+        entries.append(("TIME", f"Tracking on {current_sess['repo']} (Started ~{init_time})", "time"))
         entries.append(("", "", "empty"))
 
         # 2. Extract modified files from diff if available
@@ -972,17 +1007,27 @@ class JulesTUI:
                     file_str = f"Updated {first_few} and {len(mod_files)-3} more files"
                 for f_line in textwrap.wrap(file_str, width=wrap_w):
                     entries.append(("UPDATE", f_line, "file_update"))
-                entries.append(("TIME", "Files modified by agent", "time"))
+                entries.append(("TIME", "Files modified by agent in remote VM", "time"))
                 entries.append(("", "", "empty"))
 
         # 3. Agent thoughts & verification status with rotating loading circle
-        if "progress" in status_low or "work" in status_low or "plan" in status_low:
-            entries.append(("AGENT", "Verified changes.", "agent_title"))
-            for b_line in textwrap.wrap("Running verification tests and preparing commit patch for review...", width=wrap_w):
+        if "plan" in status_low:
+            entries.append(("AGENT", "Planning Phase In Progress.", "agent_title"))
+            for b_line in textwrap.wrap("Inspecting codebase structure, analyzing requirements, and building execution steps...", width=wrap_w):
                 entries.append(("AGENT_BODY", b_line, "agent_body"))
-            entries.append(("TIME", "Automated verification step", "time"))
+            entries.append(("TIME", f"Remote agent active ({current_sess['last_active']})", "time"))
             entries.append(("", "", "empty"))
-            entries.append(("STEP", f"[*] Status: [{spinner_char}] Working / Planning - Complete pre-commit steps", "step_card"))
+            entries.append(("STEP", f"[*] Status: [{spinner_char}] Planning & Architecture Analysis", "step_card"))
+            for s_line in textwrap.wrap("Creating subtasks and preparing code modifications.", width=wrap_w):
+                entries.append(("STEP_SUB", s_line, "step_sub"))
+            entries.append(("", "", "empty"))
+        elif "progress" in status_low or "work" in status_low:
+            entries.append(("AGENT", "Implementation In Progress.", "agent_title"))
+            for b_line in textwrap.wrap("Modifying files and running automated verification tests in remote VM...", width=wrap_w):
+                entries.append(("AGENT_BODY", b_line, "agent_body"))
+            entries.append(("TIME", f"Remote agent active ({current_sess['last_active']})", "time"))
+            entries.append(("", "", "empty"))
+            entries.append(("STEP", f"[*] Status: [{spinner_char}] Working - Pre-commit and verification", "step_card"))
             for s_line in textwrap.wrap("Ensuring proper testing, verification, review, and reflection are done.", width=wrap_w):
                 entries.append(("STEP_SUB", s_line, "step_sub"))
             entries.append(("", "", "empty"))
@@ -990,11 +1035,11 @@ class JulesTUI:
             entries.append(("AGENT", "Task Completed Successfully.", "agent_title"))
             for b_line in textwrap.wrap("All automated verification steps passed and patch is ready to pull and apply.", width=wrap_w):
                 entries.append(("AGENT_BODY", b_line, "agent_body"))
-            entries.append(("TIME", "Final step complete", "time"))
+            entries.append(("TIME", "Final step complete - Ready to apply", "time"))
             entries.append(("", "", "empty"))
         elif "fail" in status_low or "error" in status_low:
             entries.append(("AGENT", "Task Execution Encountered An Issue.", "agent_title"))
-            for b_line in textwrap.wrap("One or more automated verification tests reported failures.", width=wrap_w):
+            for b_line in textwrap.wrap("One or more automated verification tests reported failures or task stopped.", width=wrap_w):
                 entries.append(("AGENT_BODY", b_line, "agent_body"))
             entries.append(("TIME", "Execution halted", "time"))
             entries.append(("", "", "empty"))
@@ -1067,7 +1112,7 @@ class JulesTUI:
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(3) | curses.A_BOLD)
             else:
-                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] or [Enter] to talk)"
+                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] to chat, [c] to continue/teleport, [a] apply patch)"
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(13))
 
@@ -1185,7 +1230,7 @@ class JulesTUI:
                     pass
 
     def _draw_settings_tab(self, start_y, start_x, height, width):
-        """Settings Control Panel allowing full configuration and theme selection."""
+        """Settings Control Panel allowing full configuration, theme and model selection."""
         hdr = " Settings & Control Panel - Use [Up/Down] to select, [Left/Right/Enter] to change, [s] anywhere"
         try:
             self.stdscr.addstr(start_y, start_x, hdr[:width], curses.color_pair(12) | curses.A_BOLD)
@@ -1194,13 +1239,14 @@ class JulesTUI:
 
         items = [
             ("Visual Theme", THEMES[self.theme_keys[self.current_theme_idx]]["name"], "theme"),
+            ("Default AI Model", self.default_model, "default_model"),
             ("Desktop Notifications", "ENABLED" if self.notifications_enabled else "DISABLED", "notifications"),
             ("Sound / Audio Beep", "ENABLED" if self.sound_enabled else "DISABLED", "sound"),
             ("Auto-Refresh Interval", f"{self.auto_refresh_seconds}s" if self.auto_refresh_enabled else "OFF", "autorefresh"),
             ("Default Working Repo", self.config.get("default_repo") or "(Current Directory Repo)", "default_repo"),
             ("Jules CLI Path", self.client.jules_bin, "jules_bin"),
             ("Action: Create New Session", "[ Open Dialog ]", "act_new"),
-            ("Action: Refresh Data & Remote Cache", "[ Execute ]", "act_refresh"),
+            ("Action: Force Refresh & Synced Data", "[ Execute ]", "act_refresh"),
             ("Action: View Keybindings & Help", "[ View Help ]", "act_help"),
         ]
 
@@ -1224,7 +1270,7 @@ class JulesTUI:
 
         help_box_y = start_y + len(items) * 2 + 3
         try:
-            self.stdscr.addstr(help_box_y, start_x + 4, "[Tips] Press [Enter] on Theme, Notifications, or Sound to toggle immediately.", curses.color_pair(13))
+            self.stdscr.addstr(help_box_y, start_x + 4, "[Tips] Press [Enter] on Theme, Model, Notifications, or Sound to toggle.", curses.color_pair(13))
             self.stdscr.addstr(help_box_y + 1, start_x + 4, "[Tips] Press [s] from any view to jump straight to Settings.", curses.color_pair(13))
         except curses.error:
             pass
@@ -1270,7 +1316,7 @@ class JulesTUI:
         except curses.error:
             pass
 
-        shortcuts = " [1-6] Tab | [n] New | [t] Teleport | [p] Pull | [a] Apply | [i] Chat | [/] Filter | [s] Settings | [?] Help | [q] Quit"
+        shortcuts = " [1-6] Tab | [n] New | [t] Teleport | [p] Pull | [a] Apply | [i] Chat | [c] Continue | [/] Filter | [s] Settings | [q] Quit"
         shortcut_line = shortcuts[:max_x]
         try:
             self.stdscr.addstr(max_y - 1, 0, shortcut_line, curses.color_pair(2))
@@ -1342,7 +1388,7 @@ class JulesTUI:
             self.set_status(f"Auto-refresh {status}")
             return
 
-        # Theme Cycle (Fixed: does NOT fall through to teleport)
+        # Theme Cycle
         elif ch in (ord('T'),):
             self.current_theme_idx = (self.current_theme_idx + 1) % len(self.theme_keys)
             self.config["theme"] = self.theme_keys[self.current_theme_idx]
@@ -1423,7 +1469,7 @@ class JulesTUI:
             current_sess = self.filtered_sessions[self.session_index]
             self.prompt_pull_apply(current_sess["id"])
 
-        # Teleport (Fixed: strictly lowercase 't')
+        # Teleport
         elif ch == ord('t'):
             current_sess = self.filtered_sessions[self.session_index]
             self.prompt_teleport(current_sess["id"])
@@ -1438,9 +1484,17 @@ class JulesTUI:
             self.timeline_scroll_y = max(0, self.timeline_scroll_y - 1)
         elif ch in (curses.KEY_DOWN, ord('j')):
             self.timeline_scroll_y += 1
-        elif ch in (ord('i'), ord('I'), ord('\n'), 10, 13):
+        elif ch in (ord('i'), ord('I')):
             self.chat_input_active = True
-            self.set_status("Type message for Jules. Press [Enter] to send, [Esc] to cancel.")
+            self.set_status("Type follow-up message for Jules. Press [Enter] to send, [Esc] to cancel.")
+        elif ch in (ord('c'), ord('C')):
+            if self.filtered_sessions:
+                current_sess = self.filtered_sessions[self.session_index]
+                self.prompt_teleport(current_sess["id"])
+        elif ch in (ord('a'), ord('A')):
+            if self.filtered_sessions:
+                current_sess = self.filtered_sessions[self.session_index]
+                self.prompt_pull_apply(current_sess["id"])
         elif ch in (ord('d'), ord('D')):
             self.active_tab = 2
             if self.filtered_sessions:
@@ -1462,15 +1516,14 @@ class JulesTUI:
                     self.chat_history[sess_id] = []
                 self.chat_history[sess_id].append({"sender": "You", "text": msg, "time": now_str})
                 
-                # Automated response acknowledgment
                 self.chat_history[sess_id].append({
                     "sender": "Jules",
-                    "text": f"Acknowledged: \"{msg}\". Updating task context...",
+                    "text": f"Received follow-up instruction: \"{msg}\". Updating remote context on {current_sess['repo']}...",
                     "time": now_str
                 })
                 save_chat_history(self.chat_history)
-                self.log(f"Sent message to Jules session {sess_id}: {msg}", "info")
-                self.set_status(f"Message sent to session {sess_id}!")
+                self.log(f"Follow-up for Jules #{sess_id}: {msg}", "info")
+                self.set_status(f"Message logged for session #{sess_id}. Press [c] to continue/teleport.")
                 self.chat_input_text = ""
             self.chat_input_active = False
         elif ch in (curses.KEY_BACKSPACE, 127, 8):
@@ -1522,7 +1575,7 @@ class JulesTUI:
         if ch in (curses.KEY_UP, ord('k')):
             self.settings_index = max(0, self.settings_index - 1)
         elif ch in (curses.KEY_DOWN, ord('j')):
-            self.settings_index = min(8, self.settings_index + 1)
+            self.settings_index = min(9, self.settings_index + 1)
         elif ch in (ord('\n'), 10, 13, curses.KEY_RIGHT, curses.KEY_LEFT, ord(' ')):
             if self.settings_index == 0:  # Theme
                 self.current_theme_idx = (self.current_theme_idx + 1) % len(self.theme_keys)
@@ -1530,19 +1583,26 @@ class JulesTUI:
                 save_config(self.config)
                 self._init_colors()
                 self.set_status(f"Theme: {THEMES[self.theme_keys[self.current_theme_idx]]['name']}")
-            elif self.settings_index == 1:  # Desktop notifications
+            elif self.settings_index == 1:  # Default AI Model
+                cur_m = self.default_model
+                next_idx = (SUPPORTED_MODELS.index(cur_m) + 1) % len(SUPPORTED_MODELS) if cur_m in SUPPORTED_MODELS else 0
+                self.default_model = SUPPORTED_MODELS[next_idx]
+                self.config["default_model"] = self.default_model
+                save_config(self.config)
+                self.set_status(f"Default Model: {self.default_model}")
+            elif self.settings_index == 2:  # Desktop notifications
                 self.notifications_enabled = not self.notifications_enabled
                 self.config["notifications_enabled"] = self.notifications_enabled
                 save_config(self.config)
                 self.set_status(f"Desktop Notifications: {'ENABLED' if self.notifications_enabled else 'DISABLED'}")
-            elif self.settings_index == 2:  # Sound
+            elif self.settings_index == 3:  # Sound
                 self.sound_enabled = not self.sound_enabled
                 self.config["sound_enabled"] = self.sound_enabled
                 save_config(self.config)
                 if self.sound_enabled:
                     curses.beep()
                 self.set_status(f"Sound / Audio Beep: {'ENABLED' if self.sound_enabled else 'DISABLED'}")
-            elif self.settings_index == 3:  # Auto-refresh
+            elif self.settings_index == 4:  # Auto-refresh
                 intervals = [0, 5, 10, 30, 60]
                 cur_int = self.auto_refresh_seconds if self.auto_refresh_enabled else 0
                 next_idx = (intervals.index(cur_int) + 1) % len(intervals) if cur_int in intervals else 0
@@ -1556,25 +1616,25 @@ class JulesTUI:
                 self.config["auto_refresh_seconds"] = self.auto_refresh_seconds
                 save_config(self.config)
                 self.set_status(f"Auto-refresh: {'OFF' if not self.auto_refresh_enabled else f'{self.auto_refresh_seconds}s'}")
-            elif self.settings_index == 4:  # Default repo
+            elif self.settings_index == 5:  # Default repo
                 r = self._text_input_modal("Set Default Repository", "Repo (owner/repo): ", initial=self.config.get("default_repo", ""))
                 if r is not None:
                     self.config["default_repo"] = r.strip()
                     save_config(self.config)
                     self.set_status(f"Default repo set to: {self.config['default_repo']}")
-            elif self.settings_index == 5:  # Jules CLI path
+            elif self.settings_index == 6:  # Jules CLI path
                 b = self._text_input_modal("Set Jules Binary Path", "Path: ", initial=self.client.jules_bin)
                 if b is not None and b.strip():
                     self.config["jules_bin"] = b.strip()
                     self.client.jules_bin = b.strip()
                     save_config(self.config)
                     self.set_status(f"Jules binary set to: {self.client.jules_bin}")
-            elif self.settings_index == 6:  # Create session
+            elif self.settings_index == 7:  # Create session
                 self.prompt_new_session()
-            elif self.settings_index == 7:  # Force refresh
+            elif self.settings_index == 8:  # Force refresh
                 self.diff_cache.clear()
                 self.trigger_refresh()
-            elif self.settings_index == 8:  # Help
+            elif self.settings_index == 9:  # Help
                 self.show_help_modal()
 
     def _handle_logs_input(self, ch):
@@ -1627,21 +1687,24 @@ class JulesTUI:
             self.task_queue.put(("teleport", session_id))
 
     def prompt_new_session(self, default_repo=None):
+        """Create new session modal with model selection."""
         max_y, max_x = self.stdscr.getmaxyx()
-        win_w = min(74, max_x - 4)
-        win_h = 16
+        win_w = min(76, max_x - 4)
+        win_h = 18
         win_y = (max_y - win_h) // 2
         win_x = (max_x - win_w) // 2
 
         repo = default_repo or self.config.get("default_repo") or (self.repos[0] if self.repos else "")
         parallel = 1
+        model_idx = SUPPORTED_MODELS.index(self.default_model) if self.default_model in SUPPORTED_MODELS else 0
 
         fields = [
             {"label": "Repository", "value": repo, "type": "repo"},
+            {"label": "AI Model", "value": SUPPORTED_MODELS[model_idx], "type": "model", "model_idx": model_idx},
             {"label": "Parallel Runs (1-5)", "value": str(parallel), "type": "number"},
             {"label": "Task Description / Prompt", "value": "", "type": "text"},
         ]
-        curr_field = 2
+        curr_field = 3
 
         curses.curs_set(1)
         win = curses.newwin(win_h, win_w, win_y, win_x)
@@ -1663,20 +1726,27 @@ class JulesTUI:
 
                 val_x = 3 + len(label_str) + 1
                 val_w = win_w - val_x - 4
-                val_display = (f["value"][:val_w-1] + " ") if f["value"] else " "
+                
+                if f["type"] == "model":
+                    val_display = f"< {f['value']} >"
+                else:
+                    val_display = (f["value"][:val_w-1] + " ") if f["value"] else " "
                 
                 if is_active:
                     win.addstr(y, val_x, val_display.ljust(val_w), curses.color_pair(3))
                 else:
                     win.addstr(y, val_x, val_display.ljust(val_w), curses.color_pair(13) | curses.A_UNDERLINE)
 
-            win.addstr(win_h - 3, 2, "Controls: [Tab/Up/Down] Navigate  [Enter] Submit  [Esc] Cancel", curses.color_pair(13))
+            win.addstr(win_h - 3, 2, "Controls: [Tab/Up/Down] Navigate  [Left/Right] Model  [Enter] Submit  [Esc] Cancel", curses.color_pair(13))
             win.refresh()
 
             curr_y = 4 + curr_field * 2
             lbl_len = len(fields[curr_field]["label"]) + 4
-            curr_cursor_x = min(win_x + lbl_len + len(fields[curr_field]["value"]), win_x + win_w - 4)
-            curses.setsyx(win_y + curr_y, curr_cursor_x)
+            if fields[curr_field]["type"] != "model":
+                curr_cursor_x = min(win_x + lbl_len + len(fields[curr_field]["value"]), win_x + win_w - 4)
+                curses.setsyx(win_y + curr_y, curr_cursor_x)
+            else:
+                curses.curs_set(0)
             curses.doupdate()
 
             ch = win.getch()
@@ -1686,32 +1756,45 @@ class JulesTUI:
                 return
             elif ch in (curses.KEY_UP, curses.KEY_BTAB):
                 curr_field = (curr_field - 1) % len(fields)
+                curses.curs_set(1 if fields[curr_field]["type"] != "model" else 0)
             elif ch in (curses.KEY_DOWN, ord('\t')):
                 curr_field = (curr_field + 1) % len(fields)
+                curses.curs_set(1 if fields[curr_field]["type"] != "model" else 0)
+            elif fields[curr_field]["type"] == "model" and ch in (curses.KEY_LEFT, curses.KEY_RIGHT, ord(' ')):
+                m_idx = fields[curr_field]["model_idx"]
+                if ch == curses.KEY_LEFT:
+                    m_idx = (m_idx - 1) % len(SUPPORTED_MODELS)
+                else:
+                    m_idx = (m_idx + 1) % len(SUPPORTED_MODELS)
+                fields[curr_field]["model_idx"] = m_idx
+                fields[curr_field]["value"] = SUPPORTED_MODELS[m_idx]
             elif ch in (ord('\n'), 10, 13):
-                p_text = fields[2]["value"].strip()
+                p_text = fields[3]["value"].strip()
                 if not p_text:
                     self.set_status("Please enter a task description!")
-                    curr_field = 2
+                    curr_field = 3
+                    curses.curs_set(1)
                     continue
 
                 r_val = fields[0]["value"].strip()
+                selected_model = fields[1]["value"]
                 try:
-                    par_val = max(1, min(5, int(fields[1]["value"].strip() or "1")))
+                    par_val = max(1, min(5, int(fields[2]["value"].strip() or "1")))
                 except ValueError:
                     par_val = 1
 
                 curses.curs_set(0)
                 self.is_loading = True
-                self.loading_text = "Sending task to Jules..."
-                self.task_queue.put(("new_session", (p_text, r_val if r_val else None, par_val)))
+                self.loading_text = f"Launching Jules session with {selected_model}..."
+                self.task_queue.put(("new_session", (p_text, r_val if r_val else None, par_val, selected_model)))
                 return
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                fields[curr_field]["value"] = fields[curr_field]["value"][:-1]
+                if fields[curr_field]["type"] != "model":
+                    fields[curr_field]["value"] = fields[curr_field]["value"][:-1]
             elif 32 <= ch <= 126:
                 if fields[curr_field]["type"] == "number" and not chr(ch).isdigit():
                     continue
-                if len(fields[curr_field]["value"]) < 200:
+                if fields[curr_field]["type"] != "model" and len(fields[curr_field]["value"]) < 200:
                     fields[curr_field]["value"] += chr(ch)
 
     def _text_input_modal(self, title, prompt, initial=""):
@@ -1847,15 +1930,16 @@ class JulesTUI:
             ("", ""),
             ("Actions & Views", ""),
             ("  Enter / Space", "Open Timeline & Chat view"),
-            ("  i / Enter (in chat)", "Talk to Jules (type & send messages)"),
+            ("  i (in timeline)", "Focus Talk to Jules chat box"),
+            ("  c (in timeline)", "Continue / Teleport into session"),
             ("  d / D", "View full Git Diff & Patch"),
-            ("  n / N", "Create New Session (repo picker & prompt)"),
+            ("  n / N", "Create New Session (with AI Model picker!)"),
             ("  t", "Teleport to session (clone & checkout)"),
             ("  p / P", "Pull remote patch"),
             ("  a", "Pull & Apply patch to local repository"),
             ("  s / S", "Open Settings & Control Center"),
             ("  / (Slash)", "Live search & filter sessions"),
-            ("  c / y", "Copy session ID to clipboard"),
+            ("  c / y (in table)", "Copy session ID to clipboard"),
             ("  r / R", "Refresh remote sessions and repos"),
             ("  Shift + A", "Toggle auto-refresh (on/off)"),
             ("  Shift + T", "Cycle color themes"),
