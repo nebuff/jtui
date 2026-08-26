@@ -44,7 +44,8 @@ DEFAULT_CONFIG = {
     "sound_enabled": True,
     "default_repo": "",
     "jules_bin": "",
-    "compact_mode": False
+    "compact_mode": False,
+    "system_prompt": ""
 }
 
 def load_config():
@@ -728,8 +729,8 @@ class JulesTUI:
                 success, out = self.client.teleport(session_id)
                 self.result_queue.put(("action_res", ("Teleport", success, out)))
             elif task_type == "new_session":
-                prompt, repo, parallel, model = payload
-                success, out = self.client.create_session(prompt, repo, parallel, model)
+                prompt, repo, parallel, model, sys_p = payload
+                success, out = self.client.create_session(prompt, repo, parallel, model, system_prompt=sys_p)
                 self.result_queue.put(("new_session_res", (prompt, success, out)))
 
             self.task_queue.task_done()
@@ -1302,9 +1303,12 @@ class JulesTUI:
         except curses.error:
             pass
 
+        sys_p = self.config.get("system_prompt", "")
+        sys_p_disp = (sys_p[:28] + "...") if len(sys_p) > 28 else (sys_p if sys_p else "(None / Default)")
         items = [
             ("Visual Theme", THEMES[self.theme_keys[self.current_theme_idx]]["name"], "theme"),
             ("Default AI Model", self.default_model, "default_model"),
+            ("System Prompt / Rules", sys_p_disp, "system_prompt"),
             ("Desktop Notifications", "ENABLED" if self.notifications_enabled else "DISABLED", "notifications"),
             ("Sound / Audio Beep", "ENABLED" if self.sound_enabled else "DISABLED", "sound"),
             ("Auto-Refresh Interval", f"{self.auto_refresh_seconds}s" if self.auto_refresh_enabled else "OFF", "autorefresh"),
@@ -1658,7 +1662,7 @@ class JulesTUI:
         if ch in (curses.KEY_UP, ord('k')):
             self.settings_index = max(0, self.settings_index - 1)
         elif ch in (curses.KEY_DOWN, ord('j')):
-            self.settings_index = min(9, self.settings_index + 1)
+            self.settings_index = min(10, self.settings_index + 1)
         elif ch in (ord('\n'), 10, 13, curses.KEY_RIGHT, curses.KEY_LEFT, ord(' ')):
             if self.settings_index == 0:  # Theme
                 self.current_theme_idx = (self.current_theme_idx + 1) % len(self.theme_keys)
@@ -1673,19 +1677,26 @@ class JulesTUI:
                 self.config["default_model"] = self.default_model
                 save_config(self.config)
                 self.set_status(f"Default Model: {self.default_model}")
-            elif self.settings_index == 2:  # Desktop notifications
+            elif self.settings_index == 2:  # System Prompt / Rules
+                cur_p = self.config.get("system_prompt", "")
+                new_p = self._text_input_modal("Custom System Prompt / Rules", "Prompt: ", initial=cur_p)
+                if new_p is not None:
+                    self.config["system_prompt"] = new_p.strip()
+                    save_config(self.config)
+                    self.set_status(f"System Prompt updated ({len(self.config['system_prompt'])} chars)")
+            elif self.settings_index == 3:  # Desktop notifications
                 self.notifications_enabled = not self.notifications_enabled
                 self.config["notifications_enabled"] = self.notifications_enabled
                 save_config(self.config)
                 self.set_status(f"Desktop Notifications: {'ENABLED' if self.notifications_enabled else 'DISABLED'}")
-            elif self.settings_index == 3:  # Sound
+            elif self.settings_index == 4:  # Sound
                 self.sound_enabled = not self.sound_enabled
                 self.config["sound_enabled"] = self.sound_enabled
                 save_config(self.config)
                 if self.sound_enabled:
                     curses.beep()
                 self.set_status(f"Sound / Audio Beep: {'ENABLED' if self.sound_enabled else 'DISABLED'}")
-            elif self.settings_index == 4:  # Auto-refresh
+            elif self.settings_index == 5:  # Auto-refresh
                 intervals = [0, 5, 10, 30, 60]
                 cur_int = self.auto_refresh_seconds if self.auto_refresh_enabled else 0
                 next_idx = (intervals.index(cur_int) + 1) % len(intervals) if cur_int in intervals else 0
@@ -1699,25 +1710,25 @@ class JulesTUI:
                 self.config["auto_refresh_seconds"] = self.auto_refresh_seconds
                 save_config(self.config)
                 self.set_status(f"Auto-refresh: {'OFF' if not self.auto_refresh_enabled else f'{self.auto_refresh_seconds}s'}")
-            elif self.settings_index == 5:  # Default repo
+            elif self.settings_index == 6:  # Default repo
                 r = self._text_input_modal("Set Default Repository", "Repo (owner/repo): ", initial=self.config.get("default_repo", ""))
                 if r is not None:
                     self.config["default_repo"] = r.strip()
                     save_config(self.config)
                     self.set_status(f"Default repo set to: {self.config['default_repo']}")
-            elif self.settings_index == 6:  # Jules CLI path
+            elif self.settings_index == 7:  # Jules CLI path
                 b = self._text_input_modal("Set Jules Binary Path", "Path: ", initial=self.client.jules_bin)
                 if b is not None and b.strip():
                     self.config["jules_bin"] = b.strip()
                     self.client.jules_bin = b.strip()
                     save_config(self.config)
                     self.set_status(f"Jules binary set to: {self.client.jules_bin}")
-            elif self.settings_index == 7:  # Create session
+            elif self.settings_index == 8:  # Create session
                 self.prompt_new_session()
-            elif self.settings_index == 8:  # Force refresh
+            elif self.settings_index == 9:  # Force refresh
                 self.diff_cache.clear()
                 self.trigger_refresh()
-            elif self.settings_index == 9:  # Help
+            elif self.settings_index == 10:  # Help
                 self.show_help_modal()
 
     def _handle_logs_input(self, ch):
@@ -1770,10 +1781,10 @@ class JulesTUI:
             self.task_queue.put(("teleport", session_id))
 
     def prompt_new_session(self, default_repo=None):
-        """Create new session modal with model selection."""
+        """Create new session modal with multi-line paste support and model selection."""
         max_y, max_x = self.stdscr.getmaxyx()
-        win_w = min(76, max_x - 4)
-        win_h = 18
+        win_w = min(82, max_x - 4)
+        win_h = min(22, max_y - 2)
         win_y = (max_y - win_h) // 2
         win_x = (max_x - win_w) // 2
 
@@ -1781,17 +1792,15 @@ class JulesTUI:
         parallel = 1
         model_idx = SUPPORTED_MODELS.index(self.default_model) if self.default_model in SUPPORTED_MODELS else 0
 
-        fields = [
-            {"label": "Repository", "value": repo, "type": "repo"},
-            {"label": "AI Model", "value": SUPPORTED_MODELS[model_idx], "type": "model", "model_idx": model_idx},
-            {"label": "Parallel Runs (1-5)", "value": str(parallel), "type": "number"},
-            {"label": "Task Description / Prompt", "value": "", "type": "text"},
-        ]
-        curr_field = 3
+        repo_val = repo
+        parallel_val = "1"
+        prompt_val = ""
+        focus = 3  # 0: repo, 1: model, 2: parallel, 3: prompt, 4: submit, 5: cancel
+        prompt_scroll = 0
 
-        curses.curs_set(1)
         win = curses.newwin(win_h, win_w, win_y, win_x)
         win.keypad(True)
+        curses.curs_set(1)
 
         while True:
             win.erase()
@@ -1799,86 +1808,199 @@ class JulesTUI:
             title = " Create New Jules Session "
             win.addstr(0, (win_w - len(title)) // 2, title, curses.color_pair(2) | curses.A_BOLD)
 
-            win.addstr(2, 2, "Configure your coding task for Jules:", curses.color_pair(12))
+            # 1. Repo Field (Row 2)
+            is_f_repo = (focus == 0)
+            win.addstr(2, 3, "Repository:", curses.color_pair(1) | (curses.A_BOLD if is_f_repo else 0))
+            rep_disp = (repo_val[:win_w - 20] + " ") if repo_val else " "
+            win.addstr(2, 16, rep_disp.ljust(win_w - 20), curses.color_pair(3 if is_f_repo else 13))
 
-            for i, f in enumerate(fields):
-                y = 4 + i * 2
-                is_active = (i == curr_field)
-                label_str = f"{f['label']}:"
-                win.addstr(y, 3, label_str, curses.color_pair(1) | (curses.A_BOLD if is_active else 0))
+            # 2. Model Field (Row 3)
+            is_f_model = (focus == 1)
+            win.addstr(3, 3, "AI Model:", curses.color_pair(1) | (curses.A_BOLD if is_f_model else 0))
+            mod_disp = f"< {SUPPORTED_MODELS[model_idx]} >"
+            win.addstr(3, 16, mod_disp.ljust(win_w - 20), curses.color_pair(3 if is_f_model else 12))
 
-                val_x = 3 + len(label_str) + 1
-                val_w = win_w - val_x - 4
-                
-                if f["type"] == "model":
-                    val_display = f"< {f['value']} >"
+            # 3. Parallel Field (Row 4)
+            is_f_par = (focus == 2)
+            win.addstr(4, 3, "Parallel:", curses.color_pair(1) | (curses.A_BOLD if is_f_par else 0))
+            win.addstr(4, 16, parallel_val.ljust(8), curses.color_pair(3 if is_f_par else 13))
+
+            # 4. Multi-line Prompt Box (Rows 6 to win_h - 4)
+            is_f_prompt = (focus == 3)
+            p_box_top = 6
+            p_box_h = max(5, win_h - 10)
+            p_box_w = win_w - 6
+
+            lbl_style = curses.color_pair(12) | curses.A_BOLD if is_f_prompt else curses.color_pair(1)
+            win.addstr(p_box_top - 1, 3, "Task Prompt / Description (Multi-line Paste Safe):", lbl_style)
+            
+            # Draw prompt inner frame
+            for r in range(p_box_h):
+                win.addstr(p_box_top + r, 3, " " * p_box_w, curses.color_pair(3 if is_f_prompt else 13) | curses.A_DIM)
+
+            # Wrap prompt text into visual lines
+            p_lines = []
+            for para in prompt_val.splitlines():
+                if not para:
+                    p_lines.append("")
                 else:
-                    val_display = (f["value"][:val_w-1] + " ") if f["value"] else " "
-                
-                if is_active:
-                    win.addstr(y, val_x, val_display.ljust(val_w), curses.color_pair(3))
-                else:
-                    win.addstr(y, val_x, val_display.ljust(val_w), curses.color_pair(13) | curses.A_UNDERLINE)
+                    wrapped = textwrap.wrap(para, width=p_box_w - 2)
+                    p_lines.extend(wrapped if wrapped else [""])
+            if not p_lines:
+                p_lines = [""]
 
-            win.addstr(win_h - 3, 2, "Controls: [Tab/Up/Down] Navigate  [Left/Right] Model  [Enter] Submit  [Esc] Cancel", curses.color_pair(13))
+            max_p_scroll = max(0, len(p_lines) - p_box_h)
+            prompt_scroll = max(0, min(prompt_scroll, max_p_scroll))
+
+            for r in range(p_box_h):
+                line_i = prompt_scroll + r
+                if line_i < len(p_lines):
+                    win.addstr(p_box_top + r, 4, p_lines[line_i][:p_box_w - 2], curses.color_pair(1 if not is_f_prompt else 3))
+
+            # 5. Buttons (Row win_h - 3)
+            btn_y = win_h - 3
+            btn_sub = " [ SUBMIT SESSION ] "
+            btn_can = " [ CANCEL ] "
+            win.addstr(btn_y, 4, btn_sub, curses.color_pair(3 if focus == 4 else 12) | curses.A_BOLD)
+            win.addstr(btn_y, 28, btn_can, curses.color_pair(3 if focus == 5 else 13) | curses.A_BOLD)
+            win.addstr(btn_y, 44, "[Tab/Shift+Tab] Move  [Ctrl+S] Submit", curses.color_pair(13))
+
             win.refresh()
 
-            curr_y = 4 + curr_field * 2
-            lbl_len = len(fields[curr_field]["label"]) + 4
-            if fields[curr_field]["type"] != "model":
-                curr_cursor_x = min(win_x + lbl_len + len(fields[curr_field]["value"]), win_x + win_w - 4)
-                curses.setsyx(win_y + curr_y, curr_cursor_x)
+            # Cursor position
+            if focus == 0:
+                curses.curs_set(1)
+                curses.setsyx(win_y + 2, min(win_x + 16 + len(repo_val), win_x + win_w - 5))
+            elif focus == 2:
+                curses.curs_set(1)
+                curses.setsyx(win_y + 4, min(win_x + 16 + len(parallel_val), win_x + 24))
+            elif focus == 3:
+                curses.curs_set(1)
+                last_line_len = len(p_lines[-1]) if p_lines else 0
+                cursor_row = min(p_box_h - 1, len(p_lines) - 1 - prompt_scroll)
+                curses.setsyx(win_y + p_box_top + max(0, cursor_row), min(win_x + 4 + last_line_len, win_x + win_w - 5))
             else:
                 curses.curs_set(0)
             curses.doupdate()
 
             ch = win.getch()
 
-            if ch == 27:
+            if ch == 27:  # Esc
                 curses.curs_set(0)
                 return
-            elif ch in (curses.KEY_UP, curses.KEY_BTAB):
-                curr_field = (curr_field - 1) % len(fields)
-                curses.curs_set(1 if fields[curr_field]["type"] != "model" else 0)
-            elif ch in (curses.KEY_DOWN, ord('\t')):
-                curr_field = (curr_field + 1) % len(fields)
-                curses.curs_set(1 if fields[curr_field]["type"] != "model" else 0)
-            elif fields[curr_field]["type"] == "model" and ch in (curses.KEY_LEFT, curses.KEY_RIGHT, ord(' ')):
-                m_idx = fields[curr_field]["model_idx"]
-                if ch == curses.KEY_LEFT:
-                    m_idx = (m_idx - 1) % len(SUPPORTED_MODELS)
-                else:
-                    m_idx = (m_idx + 1) % len(SUPPORTED_MODELS)
-                fields[curr_field]["model_idx"] = m_idx
-                fields[curr_field]["value"] = SUPPORTED_MODELS[m_idx]
-            elif ch in (ord('\n'), 10, 13):
-                p_text = fields[3]["value"].strip()
+            elif ch in (curses.KEY_BTAB,):  # Shift+Tab
+                focus = (focus - 1) % 6
+            elif ch == 9:  # Tab
+                focus = (focus + 1) % 6
+            elif ch == 19:  # Ctrl+S
+                # Instant submit
+                p_text = prompt_val.strip()
                 if not p_text:
                     self.set_status("Please enter a task description!")
-                    curr_field = 3
-                    curses.curs_set(1)
+                    focus = 3
                     continue
-
-                r_val = fields[0]["value"].strip()
-                selected_model = fields[1]["value"]
-                try:
-                    par_val = max(1, min(5, int(fields[2]["value"].strip() or "1")))
-                except ValueError:
-                    par_val = 1
-
                 curses.curs_set(0)
                 self.is_loading = True
+                selected_model = SUPPORTED_MODELS[model_idx]
+                sys_prompt = self.config.get("system_prompt", "")
                 self.loading_text = f"Launching Jules session with {selected_model}..."
-                self.task_queue.put(("new_session", (p_text, r_val if r_val else None, par_val, selected_model)))
+                self.task_queue.put(("new_session", (p_text, repo_val.strip() if repo_val.strip() else None, int(parallel_val or 1), selected_model, sys_prompt)))
                 return
-            elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                if fields[curr_field]["type"] != "model":
-                    fields[curr_field]["value"] = fields[curr_field]["value"][:-1]
-            elif 32 <= ch <= 126:
-                if fields[curr_field]["type"] == "number" and not chr(ch).isdigit():
-                    continue
-                if fields[curr_field]["type"] != "model" and len(fields[curr_field]["value"]) < 200:
-                    fields[curr_field]["value"] += chr(ch)
+            elif focus == 1:  # Model Selector
+                if ch in (curses.KEY_LEFT, ord('h')):
+                    model_idx = (model_idx - 1) % len(SUPPORTED_MODELS)
+                elif ch in (curses.KEY_RIGHT, ord('l'), ord(' ')):
+                    model_idx = (model_idx + 1) % len(SUPPORTED_MODELS)
+                elif ch in (curses.KEY_UP, ord('k')):
+                    focus = 0
+                elif ch in (curses.KEY_DOWN, ord('j'), ord('
+'), 10, 13):
+                    focus = 2
+            elif focus == 0:  # Repo field
+                if ch in (curses.KEY_DOWN, ord('
+'), 10, 13):
+                    focus = 1
+                elif ch == curses.KEY_UP:
+                    focus = 5
+                elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                    repo_val = repo_val[:-1]
+                elif 32 <= ch <= 126:
+                    repo_val += chr(ch)
+            elif focus == 2:  # Parallel field
+                if ch in (curses.KEY_DOWN, ord('
+'), 10, 13):
+                    focus = 3
+                elif ch == curses.KEY_UP:
+                    focus = 1
+                elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                    parallel_val = parallel_val[:-1]
+                elif ord('1') <= ch <= ord('5'):
+                    parallel_val = chr(ch)
+            elif focus == 3:  # Multi-line Prompt Box (Paste-Safe!)
+                if ch in (curses.KEY_UP,):
+                    if prompt_scroll > 0:
+                        prompt_scroll -= 1
+                    else:
+                        focus = 2
+                elif ch in (curses.KEY_DOWN,):
+                    if prompt_scroll < max_p_scroll:
+                        prompt_scroll += 1
+                    else:
+                        focus = 4
+                elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                    prompt_val = prompt_val[:-1]
+                elif ch in (ord('
+'), 10, 13):
+                    # In multi-line prompt, Enter inserts newline unless bursting/pasting
+                    prompt_val += "
+"
+                elif 32 <= ch <= 126 or ch == ord('	'):
+                    # Burst-drain queue for ultra-fast multi-line pasting
+                    chars = [chr(ch) if ch != ord('	') else "  "]
+                    win.nodelay(True)
+                    while True:
+                        nxt = win.getch()
+                        if nxt == -1:
+                            break
+                        if nxt in (ord('
+'), 10, 13):
+                            chars.append("
+")
+                        elif 32 <= nxt <= 126:
+                            chars.append(chr(nxt))
+                        elif nxt == ord('	'):
+                            chars.append("  ")
+                    win.nodelay(False)
+                    prompt_val += "".join(chars)
+            elif focus == 4:  # Submit Button
+                if ch in (ord('
+'), 10, 13, ord(' ')):
+                    p_text = prompt_val.strip()
+                    if not p_text:
+                        self.set_status("Please enter a task description!")
+                        focus = 3
+                        continue
+                    curses.curs_set(0)
+                    self.is_loading = True
+                    selected_model = SUPPORTED_MODELS[model_idx]
+                    sys_prompt = self.config.get("system_prompt", "")
+                    self.loading_text = f"Launching Jules session with {selected_model}..."
+                    self.task_queue.put(("new_session", (p_text, repo_val.strip() if repo_val.strip() else None, int(parallel_val or 1), selected_model, sys_prompt)))
+                    return
+                elif ch in (curses.KEY_RIGHT, ord('l')):
+                    focus = 5
+                elif ch in (curses.KEY_UP, ord('k')):
+                    focus = 3
+            elif focus == 5:  # Cancel Button
+                if ch in (ord('
+'), 10, 13, ord(' ')):
+                    curses.curs_set(0)
+                    return
+                elif ch in (curses.KEY_LEFT, ord('h')):
+                    focus = 4
+                elif ch in (curses.KEY_UP, ord('k')):
+                    focus = 3
+
 
     def _text_input_modal(self, title, prompt, initial=""):
         max_y, max_x = self.stdscr.getmaxyx()
