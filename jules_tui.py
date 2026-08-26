@@ -994,7 +994,7 @@ class JulesTUI:
         return files
 
     def _draw_timeline_tab(self, start_y, start_x, height, width):
-        """Dedicated Session Timeline & Conversation Log View with full untruncated word wrapping."""
+        """Dedicated Session Timeline & Native Chat Stream View."""
         if not self.filtered_sessions:
             try:
                 self.stdscr.addstr(start_y + 2, start_x + 4, "No active session selected. Select a session in [1] Sessions first.", curses.color_pair(13))
@@ -1013,8 +1013,9 @@ class JulesTUI:
         else:
             status_badge = f"Status: {current_sess['status']}"
 
-        init_time = self.session_discovery_time.get(sess_id, "Active")
-        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | {status_badge} | Last activity: {current_sess['last_active']}"
+        init_time = self.session_discovery_time.get(sess_id, "")
+        time_str = f"Started: ~{init_time}" if init_time else f"Active: {current_sess['last_active']}"
+        sub_hdr = f" Session #{sess_id} [{current_sess['repo']}] | {status_badge} | {time_str}"
         try:
             self.stdscr.addstr(start_y, start_x, sub_hdr[:width], curses.color_pair(12) | curses.A_BOLD)
         except curses.error:
@@ -1026,63 +1027,46 @@ class JulesTUI:
         entries = []
         wrap_w = max(30, width - 8)
 
-        # 1. Full untruncated prompt (Word-wrapped completely across multiple lines)
+        # 1. First Chat Bubble: User Initial Prompt (Full, word-wrapped, no truncation)
         full_prompt = self._get_full_prompt(current_sess)
-        entries.append(("TASK_TITLE", "[*] Task Prompt:", "header"))
-        prompt_lines = textwrap.wrap(full_prompt, width=max(20, wrap_w - 4))
-        for p_line in prompt_lines:
-            entries.append(("TASK", f"    {p_line}", "header"))
-        entries.append(("TIME", f"    Initiated on {current_sess['repo']} (Discovered ~{init_time}) | [e] View/Edit Full Text", "time"))
+        entries.append(("USER_TAG", f">>> You (Prompt):", "user_msg"))
+        for p_line in textwrap.wrap(full_prompt, width=wrap_w):
+            entries.append(("USER_BODY", f"    {p_line}", "user_body"))
         entries.append(("", "", "empty"))
 
-        # 2. Extract modified files from diff if available
+        # 2. Agent Status & Activity
+        if "plan" in status_low:
+            entries.append(("AGENT_TAG", f"[*] Jules (Planning):", "agent_msg"))
+            for b_line in textwrap.wrap("Inspecting codebase structure on " + current_sess['repo'] + ", analyzing requirements, and building execution steps...", width=wrap_w):
+                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
+            entries.append(("STEP", f"    Status: [{spinner_char}] Planning & Architecture Analysis", "step_card"))
+            entries.append(("", "", "empty"))
+        elif "progress" in status_low or "work" in status_low:
+            entries.append(("AGENT_TAG", f"[*] Jules (Working):", "agent_msg"))
+            for b_line in textwrap.wrap("Applying code modifications and running automated verification tests in remote VM...", width=wrap_w):
+                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
+            entries.append(("STEP", f"    Status: [{spinner_char}] Working - Verification and pre-commit checks", "step_card"))
+            entries.append(("", "", "empty"))
+        elif "complet" in status_low or "done" in status_low or "success" in status_low:
+            entries.append(("AGENT_TAG", f"[*] Jules (Completed):", "agent_msg"))
+            for b_line in textwrap.wrap("Task completed successfully. All verification tests passed. Patch is ready to pull and apply.", width=wrap_w):
+                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
+            entries.append(("", "", "empty"))
+        elif "fail" in status_low or "error" in status_low:
+            entries.append(("AGENT_TAG", f"[*] Jules (Issue):", "agent_msg"))
+            for b_line in textwrap.wrap("Task execution stopped or encountered failures during automated checks.", width=wrap_w):
+                entries.append(("AGENT_BODY", f"    {b_line}", "agent_body"))
+            entries.append(("", "", "empty"))
+
+        # 3. Modified files from diff if available
         diff_text = self.diff_cache.get(sess_id)
         if diff_text:
             mod_files = self._parse_modified_files(diff_text)
             if mod_files:
-                if len(mod_files) <= 3:
-                    file_str = f"Updated {', '.join(mod_files)}"
-                else:
-                    first_few = ", ".join(mod_files[:3])
-                    file_str = f"Updated {first_few} and {len(mod_files)-3} more files"
-                for f_line in textwrap.wrap(file_str, width=wrap_w):
-                    entries.append(("UPDATE", f_line, "file_update"))
-                entries.append(("TIME", "Files modified by agent in remote VM", "time"))
+                entries.append(("FILES_TAG", "    [Modified Files]:", "file_update"))
+                for mf in mod_files:
+                    entries.append(("FILE_ITEM", f"      - {mf}", "file_update"))
                 entries.append(("", "", "empty"))
-
-        # 3. Agent thoughts & verification status with rotating loading circle
-        if "plan" in status_low:
-            entries.append(("AGENT", "Planning Phase In Progress.", "agent_title"))
-            for b_line in textwrap.wrap("Inspecting codebase structure, analyzing requirements, and building execution steps...", width=wrap_w):
-                entries.append(("AGENT_BODY", b_line, "agent_body"))
-            entries.append(("TIME", f"Remote agent active ({current_sess['last_active']})", "time"))
-            entries.append(("", "", "empty"))
-            entries.append(("STEP", f"[*] Status: [{spinner_char}] Planning & Architecture Analysis", "step_card"))
-            for s_line in textwrap.wrap("Creating subtasks and preparing code modifications.", width=wrap_w):
-                entries.append(("STEP_SUB", s_line, "step_sub"))
-            entries.append(("", "", "empty"))
-        elif "progress" in status_low or "work" in status_low:
-            entries.append(("AGENT", "Implementation In Progress.", "agent_title"))
-            for b_line in textwrap.wrap("Modifying files and running automated verification tests in remote VM...", width=wrap_w):
-                entries.append(("AGENT_BODY", b_line, "agent_body"))
-            entries.append(("TIME", f"Remote agent active ({current_sess['last_active']})", "time"))
-            entries.append(("", "", "empty"))
-            entries.append(("STEP", f"[*] Status: [{spinner_char}] Working - Pre-commit and verification", "step_card"))
-            for s_line in textwrap.wrap("Ensuring proper testing, verification, review, and reflection are done.", width=wrap_w):
-                entries.append(("STEP_SUB", s_line, "step_sub"))
-            entries.append(("", "", "empty"))
-        elif "complet" in status_low or "done" in status_low or "success" in status_low:
-            entries.append(("AGENT", "Task Completed Successfully.", "agent_title"))
-            for b_line in textwrap.wrap("All automated verification steps passed and patch is ready to pull and apply.", width=wrap_w):
-                entries.append(("AGENT_BODY", b_line, "agent_body"))
-            entries.append(("TIME", "Final step complete - Ready to apply", "time"))
-            entries.append(("", "", "empty"))
-        elif "fail" in status_low or "error" in status_low:
-            entries.append(("AGENT", "Task Execution Encountered An Issue.", "agent_title"))
-            for b_line in textwrap.wrap("One or more automated verification tests reported failures or task stopped.", width=wrap_w):
-                entries.append(("AGENT_BODY", b_line, "agent_body"))
-            entries.append(("TIME", "Execution halted", "time"))
-            entries.append(("", "", "empty"))
 
         # 4. User and Agent chat interactions
         for msg in sess_chat:
@@ -1090,15 +1074,13 @@ class JulesTUI:
             text = msg.get("text", "")
             ts = msg.get("time", "")
             if sender.lower() == "you":
-                prefix = f">>> You ({ts}): "
-                msg_wrapped = textwrap.wrap(prefix + text, width=wrap_w)
-                for m_line in msg_wrapped:
-                    entries.append(("USER", m_line, "user_msg"))
+                entries.append(("USER_TAG", f">>> You ({ts}):", "user_msg"))
+                for m_line in textwrap.wrap(text, width=wrap_w):
+                    entries.append(("USER_BODY", f"    {m_line}", "user_body"))
             else:
-                prefix = f"[*] Jules ({ts}): "
-                msg_wrapped = textwrap.wrap(prefix + text, width=wrap_w)
-                for m_line in msg_wrapped:
-                    entries.append(("AGENT", m_line, "agent_msg"))
+                entries.append(("AGENT_TAG", f"[*] Jules ({ts}):", "agent_msg"))
+                for m_line in textwrap.wrap(text, width=wrap_w):
+                    entries.append(("AGENT_BODY", f"    {m_line}", "agent_body"))
             entries.append(("", "", "empty"))
 
         # Render timeline list with scrolling
@@ -1115,24 +1097,18 @@ class JulesTUI:
             y = view_y + row_i
 
             style = curses.color_pair(1)
-            if style_type == "header":
-                style = curses.color_pair(12) | curses.A_BOLD
-            elif style_type == "time":
-                style = curses.color_pair(13) | curses.A_DIM
-            elif style_type == "file_update":
-                style = curses.color_pair(10) | curses.A_BOLD
-            elif style_type == "agent_title":
+            if style_type == "user_msg":
+                style = curses.color_pair(15) | curses.A_BOLD
+            elif style_type == "user_body":
+                style = curses.color_pair(1)
+            elif style_type == "agent_msg":
                 style = curses.color_pair(16) | curses.A_BOLD
             elif style_type == "agent_body":
                 style = curses.color_pair(1)
             elif style_type == "step_card":
                 style = curses.color_pair(4) | curses.A_BOLD
-            elif style_type == "step_sub":
-                style = curses.color_pair(13)
-            elif style_type == "user_msg":
-                style = curses.color_pair(15) | curses.A_BOLD
-            elif style_type == "agent_msg":
-                style = curses.color_pair(16) | curses.A_BOLD
+            elif style_type == "file_update":
+                style = curses.color_pair(10) | curses.A_BOLD
 
             try:
                 self.stdscr.addstr(y, start_x + 2, text[:width-4], style)
@@ -1152,7 +1128,7 @@ class JulesTUI:
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(3) | curses.A_BOLD)
             else:
-                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] chat, [e] edit/view prompt, [c] continue, [a] apply)"
+                input_line = f"| {prompt_label}{self.chat_input_text} (Press [i] or [Enter] to chat, [c] to teleport, [a] apply)"
                 input_line = input_line.ljust(box_w-1) + "|"
                 self.stdscr.addstr(box_y + 1, start_x + 2, input_line[:box_w], curses.color_pair(13))
 
