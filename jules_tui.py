@@ -1026,12 +1026,13 @@ class JulesTUI:
         entries = []
         wrap_w = max(30, width - 8)
 
-        # 1. Full untruncated prompt (Word-wrapped completely)
+        # 1. Full untruncated prompt (Word-wrapped completely across multiple lines)
         full_prompt = self._get_full_prompt(current_sess)
-        prompt_lines = textwrap.wrap(f"Prompt: {full_prompt}", width=wrap_w)
+        entries.append(("TASK_TITLE", "[*] Task Prompt:", "header"))
+        prompt_lines = textwrap.wrap(full_prompt, width=max(20, wrap_w - 4))
         for p_line in prompt_lines:
-            entries.append(("TASK", p_line, "header"))
-        entries.append(("TIME", f"Tracking on {current_sess['repo']} (Discovered ~{init_time})", "time"))
+            entries.append(("TASK", f"    {p_line}", "header"))
+        entries.append(("TIME", f"    Initiated on {current_sess['repo']} (Discovered ~{init_time}) | [e] View/Edit Full Text", "time"))
         entries.append(("", "", "empty"))
 
         # 2. Extract modified files from diff if available
