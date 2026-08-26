@@ -6,32 +6,6 @@ I got fed up with the basic google jules webui so I made a nice UI
 
 ---
 
-## Features
-
-- **Sessions Explorer (`[1]`)**: View all remote sessions with clear status indicators (`In Progress`, `Completed`, `Failed`), active repositories, last active time, and task descriptions.
-- **Session Timeline & Chat (`[2]`)**: Interactive activity stream matching Google Jules web UI with full multi-line word wrapping (no truncated messages), file modifications list, verification thoughts, step progress cards, and an interactive **"Talk to Jules"** input bar (`i` or `Enter`) to send instructions and messages.
-- **Interactive Git Diff & Patch Viewer (`[3]`)**: View live colorized git diffs (`+` additions, `-` deletions, `@@` hunks, file headers) with horizontal/vertical scrolling.
-- **Repository Browser (`[4]`)**: Inspect all connected GitHub repositories with one-key session launcher.
-- **Settings & Control Panel (`[5]` or `s`)**: Full visual configuration center to select themes, toggle desktop notifications & sound, configure auto-refresh intervals, set default repositories, configure binary paths, or trigger actions without memorizing shortcuts.
-- **Desktop Notifications**: Automatic desktop notifications via `notify-send` / `osascript` whenever background sessions finish (`Completed`, `Failed`, etc.) or when new sessions are created.
-- **Activity & Command Log (`[6]`)**: Real-time CLI command execution history and exit status.
-- **Teleportation (`t`)**: Fast one-key teleport (`jules teleport <session_id>`) into any session with interactive confirmation.
-- **Patch Pulling & Applying (`p` / `a`)**: Inspect remote patches and apply them (`--apply`) directly to your local workspace.
-- **Instant Search & Filter (`/`)**: Real-time filter across session IDs, repository names, statuses, and prompts.
-- **Comprehensive Themes (`Shift+T` or via Settings)**:
-  - **Twilight** (Warm amber / orange / dark gold palette matching btop)
-  - **Nord** (Arctic frost cyan / slate blue)
-  - **Gruvbox** (Retro earth tones / warm green & yellow)
-  - **Tokyo Night** (Neon cyber blue & purple)
-  - **Catppuccin** (Mocha / pastel aesthetic)
-  - **Dracula** (Vampire purple & pink)
-  - **Monokai** (Classic pro vibrant colors)
-  - **Solarized Dark** (Teal & blue)
-  - **Google Dark** (Google cyan & blue)
-  - **Minimal / Monochrome** (Clean black & white)
-
----
-
 ## Quick Start
 
 ### Run directly:

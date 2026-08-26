@@ -520,7 +520,7 @@ class JulesTUI:
         self.is_loading = False
         self.loading_text = ""
         
-        # Loading circle animation spinner: | / - \
+        # Loading circle animation spinner
         self.spinner_chars = ["|", "/", "-", "\\"]
         self.spinner_idx = 0
         self.spinner_tick = 0
